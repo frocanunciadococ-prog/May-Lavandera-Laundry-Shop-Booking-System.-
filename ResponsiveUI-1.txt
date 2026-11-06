@@ -1,0 +1,311 @@
+package laundryshop_bookingsystem;
+
+import java.awt.Component;
+import java.awt.Container;
+import java.awt.Dimension;
+import java.awt.Font;
+import java.awt.LayoutManager;
+import java.awt.Rectangle;
+import java.awt.event.ComponentAdapter;
+import java.awt.event.ComponentEvent;
+import java.util.IdentityHashMap;
+import java.util.Map;
+import java.util.WeakHashMap;
+import javax.swing.JFrame;
+import javax.swing.JScrollPane;
+import javax.swing.JViewport;
+
+/**
+ * Makes the hand-positioned (setBounds / null layout) screens of the
+ * laundry shop resize with the window.
+ *
+ * Usage, at the END of a frame's constructor (after the UI is built):
+ *
+ *     ResponsiveUI.enable(this, 1200, 750);
+ *
+ * Pages that already use real layout managers (like BookingPage) should
+ * call this instead, at the end of their constructor:
+ *
+ *     ResponsiveUI.syncWindow(this);
+ *
+ * That makes them open at the same size/position as the previous page.
+ *
+ * Every null-layout panel inside the frame is switched to a ScaleLayout
+ * that remembers where each child was designed to be and moves/resizes it
+ * in proportion to the panel's size. Fonts are scaled with the window too.
+ * Panels that already use a real layout manager (BorderLayout, CardLayout,
+ * scroll panes, ...) are left alone, so they keep reflowing normally.
+ */
+public final class ResponsiveUI {
+
+    private static final double MIN_FONT_SCALE = 0.75;
+    private static final double MAX_FONT_SCALE = 1.6;
+
+    /** Font bookkeeping (shared, weak so closed windows can be freed). */
+    private static final Map<Component, Font> BASE_FONT = new WeakHashMap<>();
+    private static final Map<Component, Font> APPLIED_FONT = new WeakHashMap<>();
+
+    /** Window geometry shared between pages. */
+    private static Rectangle lastWindowBounds;
+    private static boolean lastMaximized;
+
+    private ResponsiveUI() {
+    }
+
+    // =====================================================
+    // PUBLIC API
+    // =====================================================
+
+    /**
+     * Makes the frame resizable and scales its contents.
+     *
+     * @param frame   the frame being built
+     * @param designW width the screen was designed for (content area)
+     * @param designH height the screen was designed for (content area)
+     */
+    public static void enable(JFrame frame, int designW, int designH) {
+
+        Container root = frame.getContentPane();
+
+        // Start at exactly the designed content size (the old setSize()
+        // included the title bar, which cut the bottom of the page off).
+        root.setPreferredSize(new Dimension(designW, designH));
+
+        scaleContents(root, designW, designH);
+
+        // Scale fonts whenever the window size changes (works for any root layout).
+        root.addComponentListener(new ComponentAdapter() {
+            @Override
+            public void componentResized(ComponentEvent e) {
+                applyFonts(root, designW, designH);
+            }
+        });
+
+        frame.setResizable(true);
+        frame.pack();
+        frame.setMinimumSize(new Dimension(
+                Math.min(900, frame.getWidth()),
+                Math.min(600, frame.getHeight())));
+
+        // Restore the previous window geometry across page navigation.
+        syncWindow(frame);
+    }
+
+    /**
+     * Restores the last remembered window size/position and keeps
+     * remembering it. Call this at the END of the constructor of any
+     * page that does not call enable().
+     */
+    public static void syncWindow(JFrame frame) {
+
+        if (lastWindowBounds != null) {
+            frame.setBounds(lastWindowBounds);
+            if (lastMaximized) {
+                frame.setExtendedState(
+                        frame.getExtendedState() | JFrame.MAXIMIZED_BOTH);
+            }
+        } else {
+            frame.setLocationRelativeTo(null);
+        }
+
+        frame.addComponentListener(new ComponentAdapter() {
+            @Override
+            public void componentResized(ComponentEvent e) {
+                remember();
+            }
+
+            @Override
+            public void componentMoved(ComponentEvent e) {
+                remember();
+            }
+
+            private void remember() {
+                if ((frame.getExtendedState() & JFrame.MAXIMIZED_BOTH) != 0) {
+                    lastMaximized = true;
+                } else if (frame.isShowing()) {
+                    lastMaximized = false;
+                    lastWindowBounds = frame.getBounds();
+                }
+            }
+        });
+
+        frame.addWindowStateListener(e -> {
+            lastMaximized = (e.getNewState() & JFrame.MAXIMIZED_BOTH) != 0;
+            if (!lastMaximized && frame.isShowing()) {
+                lastWindowBounds = frame.getBounds();
+            }
+        });
+    }
+
+    /**
+     * Only installs the scaling layouts on a container tree (no window
+     * changes). Used by enable(); public so panels can be set up too.
+     */
+    public static void scaleContents(Container root, int designW, int designH) {
+        install(root, new Dimension(designW, designH), root);
+    }
+
+    // =====================================================
+    // INSTALLATION
+    // =====================================================
+
+    private static void install(Container c, Dimension design, Container root) {
+
+        if (c.getLayout() == null) {
+            c.setLayout(new ScaleLayout(design, root));
+        }
+
+        for (Component child : c.getComponents()) {
+            if (child instanceof JScrollPane) {
+                continue; // scroll panes manage their own content
+            }
+            if (child instanceof Container) {
+                Container cc = (Container) child;
+                Dimension d = new Dimension(
+                        Math.max(cc.getWidth(), 0), Math.max(cc.getHeight(), 0));
+                install(cc, d, root);
+            }
+        }
+    }
+
+    // =====================================================
+    // LAYOUT MANAGER
+    // =====================================================
+
+    /**
+     * Keeps each child at the same relative position and size it was
+     * given by setBounds(), whatever the size of the container.
+     */
+    private static final class ScaleLayout implements LayoutManager {
+
+        private final Dimension design;
+        private final Container root;
+
+        /** Bounds the child was designed with. */
+        private final Map<Component, Rectangle> base = new IdentityHashMap<>();
+
+        /** Bounds this layout last applied (to detect code calling setBounds later). */
+        private final Map<Component, Rectangle> applied = new IdentityHashMap<>();
+
+        ScaleLayout(Dimension design, Container root) {
+            this.design = new Dimension(design);
+            this.root = root;
+        }
+
+        @Override
+        public void addLayoutComponent(String name, Component comp) {
+        }
+
+        @Override
+        public void removeLayoutComponent(Component comp) {
+            base.remove(comp);
+            applied.remove(comp);
+        }
+
+        @Override
+        public Dimension preferredLayoutSize(Container parent) {
+            Dimension p = parent.getPreferredSize();
+            return design.width > 0 ? new Dimension(design) : p;
+        }
+
+        @Override
+        public Dimension minimumLayoutSize(Container parent) {
+            return new Dimension(0, 0);
+        }
+
+        @Override
+        public void layoutContainer(Container parent) {
+
+            // Learn the design size the first time we see a real size.
+            if (design.width <= 0 || design.height <= 0) {
+                if (parent.getWidth() > 0 && parent.getHeight() > 0) {
+                    design.setSize(parent.getWidth(), parent.getHeight());
+                } else {
+                    return;
+                }
+            }
+
+            double sx = parent.getWidth() / (double) design.width;
+            double sy = parent.getHeight() / (double) design.height;
+
+            for (Component child : parent.getComponents()) {
+
+                Rectangle current = child.getBounds();
+                Rectangle last = applied.get(child);
+
+                // New child, or code moved it itself: current bounds are the design.
+                if (!base.containsKey(child) || (last != null && !last.equals(current))) {
+                    base.put(child, current);
+                }
+
+                // Panels added later (e.g. booking cards) get scaled too.
+                if (child instanceof Container
+                        && !(child instanceof JScrollPane)
+                        && ((Container) child).getLayout() == null) {
+                    Container cc = (Container) child;
+                    cc.setLayout(new ScaleLayout(
+                            new Dimension(current.width, current.height), root));
+                }
+
+                Rectangle b = base.get(child);
+                Rectangle scaled = new Rectangle(
+                        (int) Math.round(b.x * sx),
+                        (int) Math.round(b.y * sy),
+                        (int) Math.round(b.width * sx),
+                        (int) Math.round(b.height * sy));
+
+                child.setBounds(scaled);
+                applied.put(child, scaled);
+            }
+
+            if (parent == root) {
+                applyFonts(root, design.width, design.height);
+            }
+        }
+    }
+
+    // =====================================================
+    // FONTS
+    // =====================================================
+
+    private static void applyFonts(Container root, int designW, int designH) {
+        if (root.getWidth() <= 0 || root.getHeight() <= 0) {
+            return;
+        }
+        double s = Math.min(root.getWidth() / (double) designW,
+                root.getHeight() / (double) designH);
+        double fs = Math.max(MIN_FONT_SCALE, Math.min(MAX_FONT_SCALE, s));
+        scaleFonts(root, fs);
+    }
+
+    private static void scaleFonts(Container c, double fs) {
+
+        for (Component child : c.getComponents()) {
+
+            // Fixed-height list content stays at its designed font size.
+            if (child instanceof JViewport || child instanceof JScrollPane) {
+                continue;
+            }
+
+            Font f = child.getFont();
+
+            if (f != null) {
+                Font last = APPLIED_FONT.get(child);
+                if (!BASE_FONT.containsKey(child)
+                        || (last != null && !last.equals(f))) {
+                    BASE_FONT.put(child, f);
+                }
+                Font b = BASE_FONT.get(child);
+                Font scaled = b.deriveFont((float) (b.getSize2D() * fs));
+                if (!scaled.equals(f)) {
+                    child.setFont(scaled);
+                }
+                APPLIED_FONT.put(child, child.getFont());
+            }
+
+            if (child instanceof Container) {
+                scaleFonts((Container) child, fs);
+            }
+        }
+    }
+}

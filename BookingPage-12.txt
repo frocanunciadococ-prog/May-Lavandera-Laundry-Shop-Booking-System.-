@@ -1,0 +1,1326 @@
+package laundryshop_bookingsystem;
+
+import javax.swing.*;
+import javax.swing.event.DocumentEvent;
+import javax.swing.event.DocumentListener;
+import javax.swing.text.AbstractDocument;
+import javax.swing.text.AttributeSet;
+import javax.swing.text.BadLocationException;
+import javax.swing.text.DocumentFilter;
+
+import java.awt.*;
+import java.awt.event.MouseAdapter;
+import java.awt.event.MouseEvent;
+
+import java.sql.Connection;
+import java.sql.PreparedStatement;
+import java.sql.SQLException;
+
+import java.time.DayOfWeek;
+import java.time.LocalDate;
+import java.time.LocalTime;
+import java.time.YearMonth;
+
+import java.time.format.DateTimeFormatter;
+import java.time.format.TextStyle;
+
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Locale;
+import java.util.function.Consumer;
+
+/**
+ * Customer screen for creating a laundry booking.
+ *
+ * SIZING: every component is placed by a layout manager
+ * (BorderLayout / GridBagLayout / BoxLayout / FlowLayout), so sizes
+ * come from the content and the window instead of fixed pixel
+ * coordinates. The form lives in a scroll pane, so nothing is ever
+ * cut off on small screens. ResponsiveUI is no longer needed.
+ */
+public class BookingPage extends JFrame {
+
+    // =====================================================
+    // BUSINESS RULES
+    // =====================================================
+
+    // NOTE: this value is an empty string in the original file
+    // (the emoji/text was probably lost when copying). Put your
+    // real pickup label here, e.g. "Pickup Service".
+    private static final String SERVICE_PICKUP = "";
+
+    private static final String[] SERVICES = {
+        "Wash • Dry • Fold",
+        SERVICE_PICKUP
+    };
+
+    private static final double PRICE_PER_KG = 45.0;
+    private static final double PICKUP_FEE = 35.0;
+
+    private static final LocalTime OPEN_TIME = LocalTime.of(7, 0);
+    private static final LocalTime CLOSE_TIME = LocalTime.of(19, 0);
+    private static final int SLOT_MINUTES = 30;
+
+    private static final String STATUS_PENDING = "Pending";
+    private static final String PAYMENT_NOT_PAID = "Not Paid";
+
+    private static final String INSERT_BOOKING_SQL =
+            "INSERT INTO tbl_bookings "
+            + "(username, service, booking_date, booking_time, "
+            + "booking_status, payment_status, quantity, weight, amount) "
+            + "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)";
+
+    private static final DateTimeFormatter DISPLAY_TIME_FORMAT =
+            DateTimeFormatter.ofPattern("h:mm a", Locale.ENGLISH);
+
+    private static final DateTimeFormatter SQL_TIME_FORMAT =
+            DateTimeFormatter.ofPattern("HH:mm:ss");
+
+    // =====================================================
+    // THEME
+    // =====================================================
+
+    private static final Color PURPLE = new Color(105, 55, 145);
+    private static final Color PURPLE_HOVER = new Color(125, 75, 165);
+    private static final Color LIGHT_PURPLE = new Color(220, 205, 235);
+    private static final Color VERY_LIGHT_PURPLE = new Color(245, 239, 248);
+    private static final Color BACKGROUND = new Color(248, 245, 250);
+    private static final Color TEXT = new Color(55, 45, 65);
+    private static final Color GRAY = new Color(110, 105, 115);
+
+    private static final Font FONT_TITLE = new Font("Arial", Font.BOLD, 24);
+    private static final Font FONT_SECTION = new Font("Arial", Font.BOLD, 17);
+    private static final Font FONT_AMOUNT = new Font("Arial", Font.BOLD, 32);
+    private static final Font FONT_LABEL = new Font("Arial", Font.BOLD, 13);
+    private static final Font FONT_BODY = new Font("Arial", Font.PLAIN, 13);
+    private static final Font FONT_INFO = new Font("Arial", Font.PLAIN, 12);
+    private static final Font FONT_HINT = new Font("Arial", Font.PLAIN, 11);
+
+    // =====================================================
+    // LAYOUT
+    // =====================================================
+
+    private static final int FIELD_HEIGHT = 40;
+    private static final int PAGE_PADDING = 40;
+    private static final int COLUMN_GAP = 24;
+
+    // =====================================================
+    // STATE
+    // =====================================================
+
+    private final String userName;
+
+    private JComboBox<String> serviceBox;
+    private JTextField quantityField;
+    private JTextField weightField;
+    private JTextField dateField;
+    private JComboBox<String> timeBox;
+    private JLabel amountLabel;
+
+    private LocalDate selectedDate;
+
+    private final List<LocalTime> slotTimes = new ArrayList<>();
+
+    // =====================================================
+    // CONSTRUCTOR
+    // =====================================================
+
+    public BookingPage(String userName) {
+
+        this.userName = userName;
+
+        setTitle("Lavandera - Book Laundry");
+        setDefaultCloseOperation(JFrame.EXIT_ON_CLOSE);
+
+        JPanel root = new JPanel(new BorderLayout());
+        root.setBackground(BACKGROUND);
+        setContentPane(root);
+
+        root.add(buildHeader(), BorderLayout.NORTH);
+
+        ScrollablePanel content = new ScrollablePanel(new GridBagLayout());
+        content.setBackground(BACKGROUND);
+        content.setBorder(BorderFactory.createEmptyBorder(
+                10, PAGE_PADDING, PAGE_PADDING, PAGE_PADDING));
+
+        GridBagConstraints c = new GridBagConstraints();
+        c.gridy = 0;
+        c.anchor = GridBagConstraints.NORTHWEST;
+        c.fill = GridBagConstraints.HORIZONTAL;
+
+        c.gridx = 0;
+        c.weightx = 3;
+        c.insets = new Insets(0, 0, 0, COLUMN_GAP);
+        content.add(buildFormPanel(), c);
+
+        c.gridx = 1;
+        c.weightx = 2;
+        c.insets = new Insets(0, COLUMN_GAP, 0, 0);
+        content.add(buildSummaryPanel(), c);
+
+        // Filler so both columns stay pinned to the top.
+        c.gridx = 0;
+        c.gridy = 1;
+        c.gridwidth = 2;
+        c.weightx = 0;
+        c.weighty = 1;
+        c.insets = new Insets(0, 0, 0, 0);
+        c.fill = GridBagConstraints.BOTH;
+        JPanel filler = new JPanel();
+        filler.setOpaque(false);
+        content.add(filler, c);
+
+        JScrollPane scroll = new JScrollPane(content);
+        scroll.setBorder(null);
+        scroll.getViewport().setBackground(BACKGROUND);
+        scroll.getVerticalScrollBar().setUnitIncrement(16);
+        scroll.setHorizontalScrollBarPolicy(
+                ScrollPaneConstants.HORIZONTAL_SCROLLBAR_AS_NEEDED);
+
+        root.add(scroll, BorderLayout.CENTER);
+
+        refreshTimeSlots();
+        updateWeightState();
+        updateAmountPreview();
+
+        // Start at 1200x750, but never larger than the screen.
+        Rectangle screen = GraphicsEnvironment
+                .getLocalGraphicsEnvironment()
+                .getMaximumWindowBounds();
+
+        setMinimumSize(new Dimension(
+                Math.min(820, screen.width),
+                Math.min(560, screen.height)));
+
+        setSize(
+                Math.min(1200, screen.width),
+                Math.min(750, screen.height));
+
+        // Use the same remembered size/position as every other page.
+        ResponsiveUI.syncWindow(this);
+    }
+
+    // =====================================================
+    // SCROLLABLE PANEL (tracks viewport width so content
+    // stretches with the window and only scrolls vertically)
+    // =====================================================
+
+    private static class ScrollablePanel extends JPanel implements Scrollable {
+
+        ScrollablePanel(LayoutManager layout) {
+            super(layout);
+        }
+
+        @Override
+        public Dimension getPreferredScrollableViewportSize() {
+            return getPreferredSize();
+        }
+
+        @Override
+        public int getScrollableUnitIncrement(
+                Rectangle visibleRect, int orientation, int direction) {
+            return 16;
+        }
+
+        @Override
+        public int getScrollableBlockIncrement(
+                Rectangle visibleRect, int orientation, int direction) {
+            return orientation == SwingConstants.VERTICAL
+                    ? visibleRect.height
+                    : visibleRect.width;
+        }
+
+        @Override
+        public boolean getScrollableTracksViewportWidth() {
+            // Track the width unless the window is narrower than
+            // the content needs; then a horizontal bar appears.
+            Container parent = getParent();
+            return parent == null
+                    || parent.getWidth() >= getMinimumSize().width;
+        }
+
+        @Override
+        public boolean getScrollableTracksViewportHeight() {
+            Container parent = getParent();
+            return parent != null
+                    && parent.getHeight() > getPreferredSize().height;
+        }
+    }
+
+    // =====================================================
+    // HEADER
+    // =====================================================
+
+    private JPanel buildHeader() {
+
+        JPanel header = new JPanel();
+        header.setLayout(new BoxLayout(header, BoxLayout.Y_AXIS));
+        header.setBackground(BACKGROUND);
+        header.setBorder(BorderFactory.createEmptyBorder(
+                30, PAGE_PADDING, 10, PAGE_PADDING));
+
+        JLabel title = new JLabel("Book Laundry");
+        title.setFont(FONT_TITLE);
+        title.setForeground(TEXT);
+        title.setAlignmentX(Component.LEFT_ALIGNMENT);
+
+        JLabel subtitle = new JLabel("Create a new laundry booking");
+        subtitle.setFont(FONT_BODY);
+        subtitle.setForeground(GRAY);
+        subtitle.setAlignmentX(Component.LEFT_ALIGNMENT);
+
+        JButton backButton = createButton(
+                "← Back", PURPLE, VERY_LIGHT_PURPLE, LIGHT_PURPLE);
+        backButton.setPreferredSize(new Dimension(100, 35));
+        backButton.setMaximumSize(new Dimension(100, 35));
+        backButton.setAlignmentX(Component.LEFT_ALIGNMENT);
+
+        backButton.addActionListener(e -> {
+            new HomePagee(userName).setVisible(true);
+            dispose();
+        });
+
+        header.add(title);
+        header.add(Box.createVerticalStrut(4));
+        header.add(subtitle);
+        header.add(Box.createVerticalStrut(14));
+        header.add(backButton);
+
+        return header;
+    }
+
+    // =====================================================
+    // FORM (LEFT COLUMN)
+    // =====================================================
+
+    private JPanel buildFormPanel() {
+
+        JPanel form = new JPanel(new GridBagLayout());
+        form.setOpaque(false);
+
+        int y = 0;
+
+        // ---- Service ----
+        place(form, fieldLabel("Laundry Service"), 0, y++, 2, 0, 0);
+
+        serviceBox = new JComboBox<>(SERVICES);
+        serviceBox.setFont(FONT_BODY);
+        serviceBox.setPreferredSize(new Dimension(200, FIELD_HEIGHT));
+        serviceBox.addActionListener(e -> {
+            updateWeightState();
+            updateAmountPreview();
+        });
+        place(form, serviceBox, 0, y++, 2, 4, 0);
+
+        // ---- Quantity & Weight (side by side) ----
+        place(form, fieldLabel("Quantity (items)"), 0, y, 1, 16, 0);
+        place(form, fieldLabel("Weight (kg)"), 1, y++, 1, 16, 12);
+
+        quantityField = textField("1");
+        ((AbstractDocument) quantityField.getDocument())
+                .setDocumentFilter(new NumericFilter(false));
+        place(form, quantityField, 0, y, 1, 4, 0);
+
+        weightField = textField("1");
+        ((AbstractDocument) weightField.getDocument())
+                .setDocumentFilter(new NumericFilter(true));
+        onTextChange(weightField, this::updateAmountPreview);
+        place(form, weightField, 1, y++, 1, 4, 12);
+
+        place(form, hint("Number of items. Example: 3"), 0, y, 1, 2, 0);
+        place(form, hint("Kilograms. Example: 1.5"), 1, y++, 1, 2, 12);
+
+        // ---- Date ----
+        place(form, fieldLabel("Booking Date"), 0, y++, 2, 16, 0);
+
+        dateField = textField("");
+        dateField.setEditable(false);
+        dateField.setBackground(Color.WHITE);
+        dateField.setCursor(Cursor.getPredefinedCursor(Cursor.HAND_CURSOR));
+        dateField.addMouseListener(new MouseAdapter() {
+            @Override
+            public void mouseClicked(MouseEvent e) {
+                openCalendar();
+            }
+        });
+
+        JButton calendarButton = createButton(
+                "Calendar", PURPLE, VERY_LIGHT_PURPLE, LIGHT_PURPLE);
+        calendarButton.setPreferredSize(new Dimension(110, FIELD_HEIGHT));
+        calendarButton.addActionListener(e -> openCalendar());
+
+        JPanel dateRow = new JPanel(new BorderLayout(10, 0));
+        dateRow.setOpaque(false);
+        dateRow.add(dateField, BorderLayout.CENTER);
+        dateRow.add(calendarButton, BorderLayout.EAST);
+        place(form, dateRow, 0, y++, 2, 4, 0);
+
+        place(form,
+                hint("Click Calendar to choose. Past dates and Sundays are disabled."),
+                0, y++, 2, 2, 0);
+
+        // ---- Time ----
+        place(form, fieldLabel("Booking Time"), 0, y++, 2, 16, 0);
+
+        timeBox = new JComboBox<>();
+        timeBox.setFont(FONT_BODY);
+        timeBox.setPreferredSize(new Dimension(200, FIELD_HEIGHT));
+        place(form, timeBox, 0, y++, 2, 4, 0);
+
+        place(form,
+                hint("We are open 7:00 AM - 7:00 PM. Slots every 30 minutes."),
+                0, y++, 2, 2, 0);
+
+        return form;
+    }
+
+    /** Adds a component to a GridBagLayout form. */
+    private static void place(
+            JPanel parent, Component comp,
+            int x, int y, int width,
+            int topGap, int leftGap
+    ) {
+        GridBagConstraints c = new GridBagConstraints();
+        c.gridx = x;
+        c.gridy = y;
+        c.gridwidth = width;
+        c.weightx = 1;
+        c.fill = GridBagConstraints.HORIZONTAL;
+        c.anchor = GridBagConstraints.WEST;
+        c.insets = new Insets(topGap, leftGap, 0, 0);
+        parent.add(comp, c);
+    }
+
+    // =====================================================
+    // SUMMARY (RIGHT COLUMN)
+    // =====================================================
+
+    private JPanel buildSummaryPanel() {
+
+        JPanel summary = new JPanel();
+        summary.setLayout(new BoxLayout(summary, BoxLayout.Y_AXIS));
+        summary.setOpaque(false);
+
+        JLabel amountTitle = new JLabel("Estimated Amount");
+        amountTitle.setFont(FONT_SECTION);
+        amountTitle.setForeground(PURPLE);
+        amountTitle.setAlignmentX(Component.LEFT_ALIGNMENT);
+
+        amountLabel = new JLabel(formatPeso(PRICE_PER_KG));
+        amountLabel.setFont(FONT_AMOUNT);
+        amountLabel.setForeground(TEXT);
+        amountLabel.setAlignmentX(Component.LEFT_ALIGNMENT);
+
+        String priceText = String.format(
+                Locale.ENGLISH,
+                "<html>Wash • Dry • Fold — ₱%.0f/kg</html>",
+                PRICE_PER_KG);
+
+        JLabel priceInfo = new JLabel(priceText);
+        priceInfo.setFont(FONT_INFO);
+        priceInfo.setForeground(GRAY);
+        priceInfo.setAlignmentX(Component.LEFT_ALIGNMENT);
+
+        JButton confirmButton = createButton(
+                "Confirm Booking", Color.WHITE, PURPLE, PURPLE_HOVER);
+        confirmButton.setPreferredSize(new Dimension(300, 50));
+        confirmButton.setMaximumSize(new Dimension(400, 50));
+        confirmButton.setAlignmentX(Component.LEFT_ALIGNMENT);
+        confirmButton.addActionListener(e -> saveBooking());
+
+        summary.add(amountTitle);
+        summary.add(Box.createVerticalStrut(6));
+        summary.add(amountLabel);
+        summary.add(Box.createVerticalStrut(10));
+        summary.add(priceInfo);
+        summary.add(Box.createVerticalStrut(40));
+        summary.add(confirmButton);
+
+        return summary;
+    }
+
+    // =====================================================
+    // NUMERIC INPUT FILTER
+    // =====================================================
+
+    private static class NumericFilter extends DocumentFilter {
+
+        private final boolean decimalAllowed;
+
+        NumericFilter(boolean decimalAllowed) {
+            this.decimalAllowed = decimalAllowed;
+        }
+
+        @Override
+        public void insertString(
+                FilterBypass fb, int offset, String text, AttributeSet attrs
+        ) throws BadLocationException {
+            replace(fb, offset, 0, text, attrs);
+        }
+
+        @Override
+        public void replace(
+                FilterBypass fb, int offset, int length,
+                String text, AttributeSet attrs
+        ) throws BadLocationException {
+
+            String current = fb.getDocument().getText(
+                    0, fb.getDocument().getLength());
+
+            String replacement = text == null ? "" : text;
+
+            String next = current.substring(0, offset)
+                    + replacement
+                    + current.substring(offset + length);
+
+            String pattern = decimalAllowed
+                    ? "[0-9]*(\\.[0-9]*)?"
+                    : "[0-9]*";
+
+            if (next.matches(pattern)) {
+                super.replace(fb, offset, length, replacement, attrs);
+            }
+        }
+    }
+
+    // =====================================================
+    // LIVE UPDATES
+    // =====================================================
+
+    private boolean isPickupSelected() {
+        return SERVICE_PICKUP.equals(serviceBox.getSelectedItem());
+    }
+
+    private void updateWeightState() {
+        weightField.setEnabled(!isPickupSelected());
+    }
+
+    private void updateAmountPreview() {
+
+        if (isPickupSelected()) {
+            amountLabel.setText(formatPeso(PICKUP_FEE));
+            return;
+        }
+
+        try {
+            double weight = Double.parseDouble(weightField.getText().trim());
+
+            if (weight < 0) {
+                throw new NumberFormatException("Negative weight");
+            }
+
+            amountLabel.setText(formatPeso(computeAmount(false, weight)));
+
+        } catch (NumberFormatException e) {
+            amountLabel.setText(formatPeso(0));
+        }
+    }
+
+    private static double computeAmount(boolean pickup, double weightKg) {
+        return pickup ? PICKUP_FEE : PRICE_PER_KG * weightKg;
+    }
+
+    private static String formatPeso(double value) {
+        return String.format(Locale.ENGLISH, "₱%,.2f", value);
+    }
+
+    // =====================================================
+    // DATE AND TIME
+    // =====================================================
+
+    private void openCalendar() {
+        new CalendarDialog(this, selectedDate, this::onDatePicked)
+                .setVisible(true);
+    }
+
+    private void onDatePicked(LocalDate date) {
+        selectedDate = date;
+        dateField.setText(date.toString());
+        refreshTimeSlots();
+    }
+
+    private void refreshTimeSlots() {
+
+        timeBox.removeAllItems();
+        slotTimes.clear();
+
+        if (selectedDate == null) {
+            timeBox.addItem("Select a date first");
+            timeBox.setEnabled(false);
+            return;
+        }
+
+        boolean isToday = selectedDate.equals(LocalDate.now());
+        LocalTime now = LocalTime.now();
+
+        for (LocalTime t = OPEN_TIME;
+             !t.isAfter(CLOSE_TIME);
+             t = t.plusMinutes(SLOT_MINUTES)) {
+
+            if (!isToday || t.isAfter(now)) {
+                slotTimes.add(t);
+            }
+        }
+
+        if (slotTimes.isEmpty()) {
+            timeBox.addItem("No time slots left today - choose another date");
+            timeBox.setEnabled(false);
+            return;
+        }
+
+        timeBox.setEnabled(true);
+        timeBox.addItem("Select a time");
+
+        for (LocalTime t : slotTimes) {
+            timeBox.addItem(t.format(DISPLAY_TIME_FORMAT));
+        }
+
+        timeBox.setSelectedIndex(0);
+    }
+
+    // =====================================================
+    // INPUT VALIDATION
+    // =====================================================
+
+    private Integer readQuantity() {
+
+        try {
+            int quantity = Integer.parseInt(quantityField.getText().trim());
+
+            if (quantity <= 0) {
+                throw new NumberFormatException("Quantity must be positive");
+            }
+
+            return quantity;
+
+        } catch (NumberFormatException e) {
+            showError(
+                    "Please enter a valid quantity.\n"
+                    + "Use a whole number such as 1, 2 or 3.",
+                    quantityField);
+            return null;
+        }
+    }
+
+    private Double readWeight() {
+
+        if (isPickupSelected()) {
+            return 0.0;
+        }
+
+        try {
+            double weight = Double.parseDouble(weightField.getText().trim());
+
+            if (weight <= 0) {
+                throw new NumberFormatException("Weight must be positive");
+            }
+
+            return weight;
+
+        } catch (NumberFormatException e) {
+            showError(
+                    "Please enter a valid weight in kilograms.\n"
+                    + "Example: 1.5",
+                    weightField);
+            return null;
+        }
+    }
+
+    private LocalDate readDate() {
+
+        if (selectedDate == null) {
+            showError("Please choose a booking date from the calendar.", null);
+            return null;
+        }
+
+        if (selectedDate.isBefore(LocalDate.now())) {
+            showError(
+                    "You cannot book a past date.\n"
+                    + "Please choose today or a coming date.",
+                    null);
+            return null;
+        }
+
+        if (selectedDate.getDayOfWeek() == DayOfWeek.SUNDAY) {
+            showError(
+                    "Sorry, Lavandera is closed every Sunday.\n"
+                    + "Please select Monday to Saturday.",
+                    null);
+            return null;
+        }
+
+        return selectedDate;
+    }
+
+    private LocalTime readTime(LocalDate bookingDate) {
+
+        int index = timeBox.getSelectedIndex();
+
+        if (!timeBox.isEnabled() || index <= 0) {
+            showError("Please choose a booking time.", timeBox);
+            return null;
+        }
+
+        if (index - 1 >= slotTimes.size()) {
+            showError("Please select a valid booking time.", timeBox);
+            return null;
+        }
+
+        LocalTime time = slotTimes.get(index - 1);
+
+        if (bookingDate.equals(LocalDate.now())
+                && !time.isAfter(LocalTime.now())) {
+
+            showError(
+                    "That time has already passed.\n"
+                    + "Please choose a later time.",
+                    timeBox);
+
+            refreshTimeSlots();
+            return null;
+        }
+
+        return time;
+    }
+
+    private void showError(String message, JComponent focusTarget) {
+
+        JOptionPane.showMessageDialog(
+                this, message, "Booking Error", JOptionPane.WARNING_MESSAGE);
+
+        if (focusTarget != null) {
+            focusTarget.requestFocusInWindow();
+        }
+    }
+
+    // =====================================================
+    // SAVE BOOKING
+    // =====================================================
+
+    private void saveBooking() {
+
+        String service = String.valueOf(serviceBox.getSelectedItem());
+
+        Integer quantity = readQuantity();
+        if (quantity == null) return;
+
+        Double weight = readWeight();
+        if (weight == null) return;
+
+        LocalDate date = readDate();
+        if (date == null) return;
+
+        LocalTime time = readTime(date);
+        if (time == null) return;
+
+        double amount = computeAmount(isPickupSelected(), weight);
+
+        int choice = showBookingConfirmation(
+                service, quantity, weight, date, time, amount);
+
+        if (choice != JOptionPane.YES_OPTION) {
+            return;
+        }
+
+        // Validate again after the confirmation dialog closes.
+        if (readDate() == null || readTime(date) == null) {
+            return;
+        }
+
+        try {
+            insertBooking(service, date, time, quantity, weight, amount);
+
+            JOptionPane.showMessageDialog(
+                    this,
+                    "Booking successfully created!\n"
+                    + "You can make another booking on this page.",
+                    "Booking Successful",
+                    JOptionPane.INFORMATION_MESSAGE);
+
+            serviceBox.setSelectedIndex(0);
+            quantityField.setText("1");
+            weightField.setText("1");
+
+            selectedDate = null;
+            dateField.setText("");
+
+            refreshTimeSlots();
+            updateWeightState();
+            updateAmountPreview();
+
+        } catch (SQLException e) {
+            JOptionPane.showMessageDialog(
+                    this,
+                    "Could not save the booking:\n" + e.getMessage(),
+                    "Database Error",
+                    JOptionPane.ERROR_MESSAGE);
+        }
+    }
+
+    // =====================================================
+    // CONFIRMATION DIALOG
+    // Sized automatically by pack() from its content.
+    // =====================================================
+
+    private int showBookingConfirmation(
+            String service, int quantity, double weight,
+            LocalDate date, LocalTime time, double amount
+    ) {
+
+        final int[] result = { JOptionPane.NO_OPTION };
+
+        JDialog dialog = new JDialog(this, "Confirm Laundry Booking", true);
+        dialog.setDefaultCloseOperation(JDialog.DISPOSE_ON_CLOSE);
+        dialog.setUndecorated(true);
+        dialog.setResizable(false);
+
+        try {
+            dialog.setBackground(new Color(0, 0, 0, 0));
+        } catch (UnsupportedOperationException ignored) {
+            // Platform has no per-pixel transparency; square corners are fine.
+        }
+
+        // ---- Rounded gradient surface ----
+        JPanel surface = new JPanel(new BorderLayout(0, 12)) {
+            @Override
+            protected void paintComponent(Graphics g) {
+                Graphics2D g2 = (Graphics2D) g.create();
+                g2.setRenderingHint(RenderingHints.KEY_ANTIALIASING,
+                        RenderingHints.VALUE_ANTIALIAS_ON);
+
+                g2.setPaint(new GradientPaint(
+                        0, 0, Color.WHITE,
+                        getWidth(), getHeight(), VERY_LIGHT_PURPLE));
+                g2.fillRoundRect(1, 1, getWidth() - 2, getHeight() - 2, 26, 26);
+
+                g2.setColor(LIGHT_PURPLE);
+                g2.setStroke(new BasicStroke(2));
+                g2.drawRoundRect(1, 1, getWidth() - 3, getHeight() - 3, 26, 26);
+
+                g2.dispose();
+            }
+        };
+        surface.setOpaque(false);
+        surface.setBorder(BorderFactory.createEmptyBorder(24, 32, 24, 32));
+        dialog.setContentPane(surface);
+
+        // ---- Header: logo + title + close button ----
+        JPanel header = new JPanel(new BorderLayout(20, 0));
+        header.setOpaque(false);
+
+        header.add(createLogoBadge(), BorderLayout.WEST);
+
+        JPanel titleBox = new JPanel();
+        titleBox.setLayout(new BoxLayout(titleBox, BoxLayout.Y_AXIS));
+        titleBox.setOpaque(false);
+
+        JLabel heading = new JLabel("Confirm Laundry Booking");
+        heading.setFont(new Font("Arial", Font.BOLD, 25));
+        heading.setForeground(TEXT);
+
+        JLabel intro = new JLabel("Please review your booking details:");
+        intro.setFont(new Font("Arial", Font.PLAIN, 15));
+        intro.setForeground(TEXT);
+
+        titleBox.add(Box.createVerticalGlue());
+        titleBox.add(heading);
+        titleBox.add(Box.createVerticalStrut(8));
+        titleBox.add(intro);
+        titleBox.add(Box.createVerticalGlue());
+        header.add(titleBox, BorderLayout.CENTER);
+
+        JButton close = new JButton("×");
+        close.setFont(new Font("Arial", Font.PLAIN, 25));
+        close.setForeground(PURPLE);
+        close.setContentAreaFilled(false);
+        close.setBorderPainted(false);
+        close.setFocusPainted(false);
+        close.setPreferredSize(new Dimension(40, 40));
+        close.addActionListener(e -> dialog.dispose());
+
+        JPanel closeWrap = new JPanel(new BorderLayout());
+        closeWrap.setOpaque(false);
+        closeWrap.add(close, BorderLayout.NORTH);
+        header.add(closeWrap, BorderLayout.EAST);
+
+        surface.add(header, BorderLayout.NORTH);
+
+        // ---- Detail rows ----
+        String[] icons = { "▣", "◇", "▱", "▦", "◷", "₱" };
+
+        String[] labels = {
+            "Laundry Service:", "Quantity:", "Weight:",
+            "Booking Date:", "Booking Time:", "Estimated Amount:"
+        };
+
+        String[] values = {
+            service,
+            quantity + " item(s)",
+            String.format(Locale.ENGLISH, "%.2f kg", weight),
+            date.toString(),
+            time.format(DISPLAY_TIME_FORMAT),
+            formatPeso(amount)
+        };
+
+        JPanel rows = new JPanel(new GridBagLayout());
+        rows.setOpaque(false);
+        rows.setBorder(BorderFactory.createEmptyBorder(8, 0, 8, 0));
+
+        GridBagConstraints c = new GridBagConstraints();
+        c.fill = GridBagConstraints.HORIZONTAL;
+        c.anchor = GridBagConstraints.WEST;
+
+        int gy = 0;
+
+        for (int i = 0; i < labels.length; i++) {
+
+            c.gridy = gy++;
+            c.gridwidth = 1;
+            c.insets = new Insets(8, 0, 8, 0);
+
+            JLabel icon = new JLabel(icons[i], SwingConstants.CENTER);
+            icon.setFont(new Font("Dialog", Font.BOLD, 19));
+            icon.setForeground(PURPLE);
+            icon.setPreferredSize(new Dimension(34, 28));
+            c.gridx = 0;
+            c.weightx = 0;
+            rows.add(icon, c);
+
+            JLabel label = new JLabel(labels[i]);
+            label.setFont(new Font("Arial", Font.PLAIN, 15));
+            label.setForeground(TEXT);
+            c.gridx = 1;
+            c.weightx = 0;
+            c.insets = new Insets(8, 8, 8, 24);
+            rows.add(label, c);
+
+            JLabel value = new JLabel(values[i]);
+            value.setFont(new Font("Arial", Font.BOLD, 15));
+            value.setForeground(TEXT);
+            c.gridx = 2;
+            c.weightx = 1;
+            c.insets = new Insets(8, 0, 8, 0);
+            rows.add(value, c);
+
+            if (i < labels.length - 1) {
+                JSeparator divider = new JSeparator();
+                divider.setForeground(LIGHT_PURPLE);
+                c.gridy = gy++;
+                c.gridx = 0;
+                c.gridwidth = 3;
+                c.weightx = 1;
+                c.insets = new Insets(0, 0, 0, 0);
+                rows.add(divider, c);
+            }
+        }
+
+        surface.add(rows, BorderLayout.CENTER);
+
+        // ---- Footer: question + buttons ----
+        JPanel footer = new JPanel();
+        footer.setLayout(new BoxLayout(footer, BoxLayout.Y_AXIS));
+        footer.setOpaque(false);
+
+        JLabel question = new JLabel("Do you want to confirm this booking?");
+        question.setFont(new Font("Arial", Font.PLAIN, 16));
+        question.setForeground(TEXT);
+        question.setAlignmentX(Component.CENTER_ALIGNMENT);
+
+        JButton yes = new JButton("✓ Yes");
+        yes.setFont(new Font("Arial", Font.BOLD, 15));
+        yes.setBackground(PURPLE);
+        yes.setForeground(Color.WHITE);
+        yes.setFocusPainted(false);
+        yes.setBorderPainted(false);
+        yes.setCursor(Cursor.getPredefinedCursor(Cursor.HAND_CURSOR));
+        yes.setPreferredSize(new Dimension(130, 42));
+        yes.addActionListener(e -> {
+            result[0] = JOptionPane.YES_OPTION;
+            dialog.dispose();
+        });
+
+        JButton no = new JButton("× No");
+        no.setFont(new Font("Arial", Font.BOLD, 15));
+        no.setBackground(Color.WHITE);
+        no.setForeground(PURPLE);
+        no.setFocusPainted(false);
+        no.setBorder(BorderFactory.createLineBorder(PURPLE, 2));
+        no.setCursor(Cursor.getPredefinedCursor(Cursor.HAND_CURSOR));
+        no.setPreferredSize(new Dimension(130, 42));
+        no.addActionListener(e -> dialog.dispose());
+
+        JPanel buttons = new JPanel(new FlowLayout(FlowLayout.CENTER, 20, 0));
+        buttons.setOpaque(false);
+        buttons.add(yes);
+        buttons.add(no);
+        buttons.setAlignmentX(Component.CENTER_ALIGNMENT);
+
+        footer.add(question);
+        footer.add(Box.createVerticalStrut(12));
+        footer.add(buttons);
+
+        surface.add(footer, BorderLayout.SOUTH);
+
+        // ---- Keyboard ----
+        dialog.getRootPane().setDefaultButton(yes);
+        dialog.getRootPane().registerKeyboardAction(
+                e -> dialog.dispose(),
+                KeyStroke.getKeyStroke("ESCAPE"),
+                JComponent.WHEN_IN_FOCUSED_WINDOW);
+
+        dialog.pack();
+        dialog.setLocationRelativeTo(this);
+        dialog.setVisible(true);
+
+        return result[0];
+    }
+
+    private static JComponent createLogoBadge() {
+
+        JPanel badge = new JPanel() {
+            @Override
+            protected void paintComponent(Graphics g) {
+                Graphics2D g2 = (Graphics2D) g.create();
+                g2.setRenderingHint(RenderingHints.KEY_ANTIALIASING,
+                        RenderingHints.VALUE_ANTIALIAS_ON);
+
+                g2.setColor(PURPLE);
+                g2.fillOval(3, 3, 112, 112);
+
+                g2.setColor(Color.WHITE);
+                g2.setStroke(new BasicStroke(2));
+                g2.drawOval(10, 10, 98, 98);
+
+                java.awt.geom.Path2D drop = new java.awt.geom.Path2D.Double();
+                drop.moveTo(59, 24);
+                drop.curveTo(45, 43, 36, 53, 36, 66);
+                drop.curveTo(36, 81, 46, 91, 59, 91);
+                drop.curveTo(72, 91, 82, 81, 82, 66);
+                drop.curveTo(82, 53, 73, 43, 59, 24);
+                drop.closePath();
+                g2.fill(drop);
+
+                g2.setFont(new Font("Georgia", Font.BOLD, 12));
+                String name = "Lavandera";
+                FontMetrics fm = g2.getFontMetrics();
+                g2.drawString(name, (118 - fm.stringWidth(name)) / 2, 105);
+
+                g2.dispose();
+            }
+        };
+
+        badge.setOpaque(false);
+
+        Dimension size = new Dimension(118, 118);
+        badge.setPreferredSize(size);
+        badge.setMinimumSize(size);
+        badge.setMaximumSize(size);
+
+        // Wrapper keeps the badge from stretching vertically.
+        JPanel wrap = new JPanel(new BorderLayout());
+        wrap.setOpaque(false);
+        wrap.add(badge, BorderLayout.NORTH);
+        return wrap;
+    }
+
+    // =====================================================
+    // DATABASE INSERT
+    // =====================================================
+
+    private void insertBooking(
+            String service, LocalDate date, LocalTime time,
+            int quantity, double weight, double amount
+    ) throws SQLException {
+
+        try (Connection conn = DBConnection.connect()) {
+
+            if (conn == null) {
+                throw new SQLException(
+                        "Cannot connect to the database. "
+                        + "Make sure MySQL is running in XAMPP.");
+            }
+
+            try (PreparedStatement pst =
+                         conn.prepareStatement(INSERT_BOOKING_SQL)) {
+
+                pst.setString(1, userName);
+                pst.setString(2, service);
+                pst.setString(3, date.toString());
+                pst.setString(4, time.format(SQL_TIME_FORMAT));
+                pst.setString(5, STATUS_PENDING);
+                pst.setString(6, PAYMENT_NOT_PAID);
+                pst.setInt(7, quantity);
+                pst.setDouble(8, weight);
+                pst.setDouble(9, amount);
+
+                pst.executeUpdate();
+            }
+        }
+    }
+
+    // =====================================================
+    // UI FACTORY HELPERS
+    // =====================================================
+
+    private static JLabel fieldLabel(String text) {
+        JLabel label = new JLabel(text);
+        label.setFont(FONT_LABEL);
+        label.setForeground(TEXT);
+        return label;
+    }
+
+    private static JLabel hint(String text) {
+        JLabel label = new JLabel(text);
+        label.setFont(FONT_HINT);
+        label.setForeground(GRAY);
+        return label;
+    }
+
+    private static JTextField textField(String initialText) {
+        JTextField field = new JTextField(initialText);
+        field.setFont(FONT_BODY);
+        field.setPreferredSize(new Dimension(100, FIELD_HEIGHT));
+        return field;
+    }
+
+    private static JButton createButton(
+            String text, Color foreground, Color background, Color hover
+    ) {
+
+        JButton button = new JButton(text);
+
+        button.setFont(new Font("Arial", Font.BOLD, 13));
+        button.setForeground(foreground);
+        button.setBackground(background);
+        button.setBorderPainted(false);
+        button.setFocusPainted(false);
+
+        button.addMouseListener(new MouseAdapter() {
+            @Override
+            public void mouseEntered(MouseEvent e) {
+                button.setBackground(hover);
+            }
+
+            @Override
+            public void mouseExited(MouseEvent e) {
+                button.setBackground(background);
+            }
+        });
+
+        return button;
+    }
+
+    private static void onTextChange(JTextField field, Runnable action) {
+
+        field.getDocument().addDocumentListener(new DocumentListener() {
+            @Override
+            public void insertUpdate(DocumentEvent e) {
+                action.run();
+            }
+
+            @Override
+            public void removeUpdate(DocumentEvent e) {
+                action.run();
+            }
+
+            @Override
+            public void changedUpdate(DocumentEvent e) {
+                action.run();
+            }
+        });
+    }
+
+    // =====================================================
+    // CALENDAR POPUP
+    // PAST DATES AND SUNDAYS ARE DISABLED
+    // =====================================================
+
+    private static class CalendarDialog extends JDialog {
+
+        private static final String[] WEEKDAYS = {
+            "Su", "Mo", "Tu", "We", "Th", "Fr", "Sa"
+        };
+
+        private static final Color PAST_BACKGROUND = new Color(240, 238, 242);
+        private static final Color PAST_FOREGROUND = new Color(180, 175, 185);
+
+        // 7 weekday headings + 6 week rows = 7 rows of 7 cells.
+        // A fixed grid keeps the dialog the same size every month.
+        private static final int GRID_ROWS = 7;
+        private static final int GRID_CELLS = GRID_ROWS * 7;
+
+        private final LocalDate currentSelection;
+        private final Consumer<LocalDate> onPick;
+
+        private YearMonth shownMonth;
+
+        private final JLabel monthLabel =
+                new JLabel("", SwingConstants.CENTER);
+
+        private final JPanel dayGrid =
+                new JPanel(new GridLayout(GRID_ROWS, 7, 4, 4));
+
+        private final JButton previousButton = new JButton("‹");
+        private final JButton nextButton = new JButton("›");
+
+        CalendarDialog(
+                Frame owner,
+                LocalDate currentSelection,
+                Consumer<LocalDate> onPick
+        ) {
+
+            super(owner, "Select Booking Date", true);
+
+            this.currentSelection = currentSelection;
+            this.onPick = onPick;
+
+            this.shownMonth = YearMonth.from(
+                    currentSelection != null
+                            ? currentSelection
+                            : LocalDate.now());
+
+            JPanel root = new JPanel(new BorderLayout(0, 10));
+            root.setBackground(Color.WHITE);
+            root.setBorder(BorderFactory.createEmptyBorder(15, 15, 15, 15));
+
+            root.add(buildHeader(), BorderLayout.NORTH);
+
+            dayGrid.setBackground(Color.WHITE);
+            dayGrid.setPreferredSize(new Dimension(330, 280));
+            root.add(dayGrid, BorderLayout.CENTER);
+
+            setContentPane(root);
+
+            renderMonth();
+
+            pack();
+            setResizable(false);
+            setLocationRelativeTo(owner);
+        }
+
+        private JPanel buildHeader() {
+
+            styleNavigationButton(previousButton);
+            styleNavigationButton(nextButton);
+
+            monthLabel.setFont(new Font("Arial", Font.BOLD, 15));
+            monthLabel.setForeground(TEXT);
+
+            previousButton.addActionListener(e -> {
+                shownMonth = shownMonth.minusMonths(1);
+                renderMonth();
+            });
+
+            nextButton.addActionListener(e -> {
+                shownMonth = shownMonth.plusMonths(1);
+                renderMonth();
+            });
+
+            JPanel header = new JPanel(new BorderLayout());
+            header.setBackground(Color.WHITE);
+            header.add(previousButton, BorderLayout.WEST);
+            header.add(monthLabel, BorderLayout.CENTER);
+            header.add(nextButton, BorderLayout.EAST);
+
+            return header;
+        }
+
+        private static void styleNavigationButton(JButton button) {
+            button.setFont(new Font("Arial", Font.BOLD, 18));
+            button.setForeground(PURPLE);
+            button.setBackground(VERY_LIGHT_PURPLE);
+            button.setBorderPainted(false);
+            button.setFocusPainted(false);
+            button.setPreferredSize(new Dimension(44, 32));
+        }
+
+        private void renderMonth() {
+
+            LocalDate today = LocalDate.now();
+
+            monthLabel.setText(
+                    shownMonth.getMonth().getDisplayName(
+                            TextStyle.FULL, Locale.ENGLISH)
+                    + " " + shownMonth.getYear());
+
+            previousButton.setEnabled(
+                    shownMonth.isAfter(YearMonth.from(today)));
+
+            dayGrid.removeAll();
+
+            for (String name : WEEKDAYS) {
+                JLabel heading = new JLabel(name, SwingConstants.CENTER);
+                heading.setFont(new Font("Arial", Font.BOLD, 12));
+                heading.setForeground(GRAY);
+                dayGrid.add(heading);
+            }
+
+            int cells = 7;
+
+            int leadingBlanks =
+                    shownMonth.atDay(1).getDayOfWeek().getValue() % 7;
+
+            for (int i = 0; i < leadingBlanks; i++) {
+                dayGrid.add(new JLabel(""));
+                cells++;
+            }
+
+            for (int day = 1; day <= shownMonth.lengthOfMonth(); day++) {
+                dayGrid.add(createDayButton(shownMonth.atDay(day), today));
+                cells++;
+            }
+
+            // Pad to a full grid so every month has identical cell sizes.
+            while (cells < GRID_CELLS) {
+                dayGrid.add(new JLabel(""));
+                cells++;
+            }
+
+            dayGrid.revalidate();
+            dayGrid.repaint();
+        }
+
+        private JButton createDayButton(LocalDate date, LocalDate today) {
+
+            JButton button = new JButton(String.valueOf(date.getDayOfMonth()));
+
+            button.setFont(new Font("Arial", Font.PLAIN, 13));
+            button.setMargin(new Insets(0, 0, 0, 0));
+            button.setHorizontalAlignment(SwingConstants.CENTER);
+            button.setFocusPainted(false);
+            button.setBorderPainted(false);
+            button.setOpaque(true);
+
+            if (date.isBefore(today)
+                    || date.getDayOfWeek() == DayOfWeek.SUNDAY) {
+
+                button.setEnabled(false);
+                button.setBackground(PAST_BACKGROUND);
+                button.setForeground(PAST_FOREGROUND);
+                return button;
+            }
+
+            if (date.equals(currentSelection)) {
+                button.setBackground(PURPLE);
+                button.setForeground(Color.WHITE);
+
+            } else if (date.equals(today)) {
+                button.setBackground(LIGHT_PURPLE);
+                button.setForeground(PURPLE);
+
+            } else {
+                button.setBackground(Color.WHITE);
+                button.setForeground(TEXT);
+            }
+
+            button.setCursor(Cursor.getPredefinedCursor(Cursor.HAND_CURSOR));
+
+            button.addActionListener(e -> {
+                onPick.accept(date);
+                dispose();
+            });
+
+            return button;
+        }
+    }
+}

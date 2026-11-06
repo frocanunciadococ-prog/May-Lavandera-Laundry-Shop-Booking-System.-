@@ -1,0 +1,926 @@
+package laundryshop_bookingsystem;
+
+import javax.swing.*;
+import java.awt.*;
+import java.awt.event.*;
+import java.awt.geom.*;
+
+/**
+ * Customer home page.
+ *
+ * <p>The sidebar switches between two views inside the same window:
+ * <b>Home</b> (welcome banner and quick actions) and <b>About Us</b>
+ * (location, laundry schedule and services combined in one place).</p>
+ */
+public class HomePagee extends JFrame  {
+
+    // =====================================================
+    // THEME
+    // =====================================================
+
+    private static final Color PURPLE = new Color(105, 55, 145);
+    private static final Color PURPLE_HOVER = new Color(125, 75, 165);
+    private static final Color LIGHT_PURPLE = new Color(220, 205, 235);
+    private static final Color VERY_LIGHT_PURPLE = new Color(245, 239, 248);
+    private static final Color BG = new Color(248, 245, 250);
+    private static final Color TEXT = new Color(45, 35, 55);
+    private static final Color GRAY = new Color(95, 85, 105);
+
+    // =====================================================
+    // STATE
+    // =====================================================
+
+    private final String userName;
+
+    private JPanel homeView;
+    private JPanel aboutView;
+    private RoundedPanel aboutCard;
+
+    private JButton homeButton;
+    private JButton aboutButton;
+
+    /** The sidebar button of the view currently shown. */
+    private JButton activeButton;
+
+    // =====================================================
+    // CONSTRUCTION
+    // =====================================================
+
+    public HomePagee(String userName) {
+
+        this.userName = userName;
+
+        setTitle("Lavandera Laundry Shop");
+        setSize(1200, 750);
+        setDefaultCloseOperation(JFrame.EXIT_ON_CLOSE);
+        setLocationRelativeTo(null);
+        setResizable(true);
+
+        createHomePage();
+
+        ResponsiveUI.enable(this, 1200, 750);
+        CustomerNotifications.watch(this, userName);
+    }
+
+    private void createHomePage() {
+
+        JPanel mainPanel = new JPanel(null);
+        mainPanel.setBackground(BG);
+        setContentPane(mainPanel);
+
+        buildSidebar(mainPanel);
+
+        // Holder for the two views (Home / About Us)
+        JPanel content = new JPanel(null);
+        content.setBackground(BG);
+        content.setBounds(230, 0, 970, 750);
+        mainPanel.add(content);
+
+        homeView = new JPanel(null);
+        homeView.setOpaque(false);
+        homeView.setBounds(0, 0, 970, 750);
+        content.add(homeView);
+
+        aboutView = new JPanel(null);
+        aboutView.setOpaque(false);
+        aboutView.setBounds(0, 0, 970, 750);
+        aboutView.setVisible(false);
+        content.add(aboutView);
+
+        buildHomeView();
+        buildAboutView();
+    }
+
+    // =====================================================
+    // SIDEBAR
+    // =====================================================
+
+    private void buildSidebar(JPanel mainPanel) {
+
+        JPanel sidebar = new JPanel(null);
+        sidebar.setBackground(Color.WHITE);
+        sidebar.setBounds(0, 0, 230, 750);
+        mainPanel.add(sidebar);
+
+        LogoPanel logo = new LogoPanel();
+        logo.setBounds(10, 10, 210, 170);
+        sidebar.add(logo);
+
+        JLabel userLabel = new JLabel(userName.toUpperCase());
+        userLabel.setFont(new Font("Arial", Font.BOLD, 13));
+        userLabel.setForeground(TEXT);
+        userLabel.setHorizontalAlignment(SwingConstants.CENTER);
+        userLabel.setBounds(5, 190, 220, 25);
+        sidebar.add(userLabel);
+
+        JLabel customerLabel = new JLabel("Customer");
+        customerLabel.setFont(new Font("Arial", Font.PLAIN, 11));
+        customerLabel.setForeground(GRAY);
+        customerLabel.setHorizontalAlignment(SwingConstants.CENTER);
+        customerLabel.setBounds(5, 215, 220, 25);
+        sidebar.add(customerLabel);
+
+        homeButton = createSidebarButton("Home");
+        homeButton.setBounds(0, 260, 230, 47);
+        sidebar.add(homeButton);
+
+        JButton bookingButton = createSidebarButton("Book Laundry");
+        bookingButton.setBounds(0, 315, 230, 47);
+        sidebar.add(bookingButton);
+
+        JButton bookingsButton = createSidebarButton("My Bookings");
+        bookingsButton.setBounds(0, 370, 230, 47);
+        sidebar.add(bookingsButton);
+
+        JButton profileButton = createSidebarButton("My Profile");
+        profileButton.setBounds(0, 425, 230, 47);
+        sidebar.add(profileButton);
+
+        aboutButton = createSidebarButton("About Us");
+        aboutButton.setBounds(0, 480, 230, 47);
+        sidebar.add(aboutButton);
+
+        JButton logoutButton = createSidebarButton("Logout");
+        logoutButton.setBounds(0, 650, 230, 47);
+        sidebar.add(logoutButton);
+
+        // Home is the view shown first
+        activeButton = homeButton;
+        applySidebarStyle(homeButton);
+
+        // Actions
+        homeButton.addActionListener(e -> showView(false));
+        aboutButton.addActionListener(e -> showView(true));
+        bookingButton.addActionListener(e -> openBooking());
+        bookingsButton.addActionListener(e -> viewBookings());
+        profileButton.addActionListener(e -> openProfile());
+        logoutButton.addActionListener(e -> logout());
+
+        // Entrance animation
+        animateSidebar(homeButton, 260, 0);
+        animateSidebar(bookingButton, 315, 80);
+        animateSidebar(bookingsButton, 370, 140);
+        animateSidebar(profileButton, 425, 200);
+        animateSidebar(aboutButton, 480, 250);
+        animateSidebar(logoutButton, 650, 300);
+    }
+
+    private JButton createSidebarButton(String text) {
+
+        JButton button = new JButton(text);
+        button.setFont(new Font("Arial", Font.BOLD, 12));
+        button.setForeground(TEXT);
+        button.setBackground(Color.WHITE);
+        button.setHorizontalAlignment(SwingConstants.LEFT);
+        button.setBorder(BorderFactory.createEmptyBorder(0, 15, 0, 0));
+        button.setBorderPainted(false);
+        button.setFocusPainted(false);
+        button.setCursor(new Cursor(Cursor.HAND_CURSOR));
+
+        button.addMouseListener(new MouseAdapter() {
+            @Override
+            public void mouseEntered(MouseEvent e) {
+                if (button != activeButton) {
+                    button.setBackground(VERY_LIGHT_PURPLE);
+                    button.setForeground(PURPLE);
+                }
+            }
+
+            @Override
+            public void mouseExited(MouseEvent e) {
+                applySidebarStyle(button);
+            }
+        });
+
+        return button;
+    }
+
+    /** Highlights the button of the current view, resets the others. */
+    private void applySidebarStyle(JButton button) {
+
+        boolean selected = button == activeButton;
+
+        button.setForeground(selected ? PURPLE : TEXT);
+        button.setBackground(selected ? LIGHT_PURPLE : Color.WHITE);
+    }
+
+    /**
+     * Switches between the Home view and the About Us view.
+     *
+     * @param about {@code true} for About Us, {@code false} for Home
+     */
+    private void showView(boolean about) {
+
+        homeView.setVisible(!about);
+        aboutView.setVisible(about);
+
+        activeButton = about ? aboutButton : homeButton;
+        applySidebarStyle(homeButton);
+        applySidebarStyle(aboutButton);
+
+        if (about) {
+            animateSlide(aboutCard, 45, 105, 45, 150, 0);
+        }
+    }
+
+    // =====================================================
+    // HOME VIEW
+    // =====================================================
+
+    private void buildHomeView() {
+
+        JLabel title = new JLabel("Home");
+        title.setFont(new Font("Georgia", Font.BOLD, 24));
+        title.setForeground(TEXT);
+        title.setBounds(45, 20, 300, 45);
+        homeView.add(title);
+
+        JLabel welcome = new JLabel(
+                "Welcome back, " + userName.toUpperCase() + "!"
+        );
+        welcome.setFont(new Font("Arial", Font.PLAIN, 13));
+        welcome.setForeground(GRAY);
+        welcome.setBounds(47, 58, 500, 30);
+        homeView.add(welcome);
+
+        JTextField searchField = new JTextField();
+        searchField.setBackground(Color.WHITE);
+        searchField.setBorder(
+                BorderFactory.createLineBorder(new Color(225, 220, 230))
+        );
+        searchField.setBounds(635, 0, 310, 38);
+        homeView.add(searchField);
+
+        // ---------- banner ----------
+
+        RoundedPanel banner = new RoundedPanel(new Color(226, 211, 238), 20);
+        banner.setLayout(null);
+        banner.setBounds(45, 105, 900, 190);
+        homeView.add(banner);
+
+        JLabel bannerTitle = new JLabel("Laundry made simple.");
+        bannerTitle.setFont(new Font("Georgia", Font.BOLD, 22));
+        bannerTitle.setForeground(PURPLE);
+        bannerTitle.setBounds(40, 45, 500, 45);
+        banner.add(bannerTitle);
+
+        JLabel bannerText = new JLabel(
+                "<html>Your clothes deserve the best care.<br>"
+                + "Book your laundry service with Lavandera today.</html>"
+        );
+        bannerText.setFont(new Font("Arial", Font.PLAIN, 13));
+        bannerText.setForeground(TEXT);
+        bannerText.setBounds(40, 90, 520, 55);
+        banner.add(bannerText);
+
+        JButton bannerButton = createPurpleButton("Book Now");
+        bannerButton.setBounds(40, 140, 125, 37);
+        banner.add(bannerButton);
+
+        SmallLogoPanel smallLogo = new SmallLogoPanel();
+        smallLogo.setBounds(710, 20, 165, 165);
+        banner.add(smallLogo);
+
+        // ---------- quick actions ----------
+
+        JLabel bookingTitle = new JLabel("Create a booking");
+        bookingTitle.setFont(new Font("Arial", Font.BOLD, 20));
+        bookingTitle.setForeground(TEXT);
+        bookingTitle.setBounds(45, 335, 400, 35);
+        homeView.add(bookingTitle);
+
+        JLabel bookingSubtitle = new JLabel(
+                "Choose what you would like to do today."
+        );
+        bookingSubtitle.setFont(new Font("Arial", Font.PLAIN, 13));
+        bookingSubtitle.setForeground(GRAY);
+        bookingSubtitle.setBounds(45, 370, 500, 30);
+        homeView.add(bookingSubtitle);
+
+        // Book Laundry card
+        RoundedPanel bookCard = createCard();
+        bookCard.setBounds(45, 420, 435, 190);
+        homeView.add(bookCard);
+
+        addCardIcon(bookCard, CardIcon.BOOK, 30, 38);
+
+        JLabel bookTitle = createCardTitle("Book Laundry");
+        bookTitle.setBounds(95, 36, 250, 30);
+        bookCard.add(bookTitle);
+
+        JLabel bookText = createCardText(
+                "<html>Schedule your laundry<br>service quickly.</html>"
+        );
+        bookText.setBounds(95, 72, 250, 50);
+        bookCard.add(bookText);
+
+        JButton bookButton = createPurpleButton("Book Now");
+        bookButton.setBounds(25, 138, 385, 38);
+        bookCard.add(bookButton);
+
+        // My Bookings card
+        RoundedPanel myBookingsCard = createCard();
+        myBookingsCard.setBounds(510, 420, 435, 190);
+        homeView.add(myBookingsCard);
+
+        addCardIcon(myBookingsCard, CardIcon.LIST, 30, 38);
+
+        JLabel myBookingsTitle = createCardTitle("My Bookings");
+        myBookingsTitle.setBounds(95, 36, 250, 30);
+        myBookingsCard.add(myBookingsTitle);
+
+        JLabel myBookingsText = createCardText(
+                "<html>View your current<br>laundry bookings.</html>"
+        );
+        myBookingsText.setBounds(95, 72, 250, 50);
+        myBookingsCard.add(myBookingsText);
+
+        JButton viewButton = createWhiteButton("View Bookings");
+        viewButton.setBounds(25, 138, 385, 38);
+        myBookingsCard.add(viewButton);
+
+        // ---------- actions and effects ----------
+
+        bannerButton.addActionListener(e -> openBooking());
+        bookButton.addActionListener(e -> openBooking());
+        viewButton.addActionListener(e -> viewBookings());
+
+        addHover(bannerButton, PURPLE, PURPLE_HOVER);
+        addHover(bookButton, PURPLE, PURPLE_HOVER);
+        addHover(viewButton, Color.WHITE, LIGHT_PURPLE);
+
+        animateSlide(title, 45, 20, 45, -50, 0);
+        animateSlide(welcome, 47, 58, 47, -20, 80);
+        animateSlide(banner, 45, 105, 950, 105, 150);
+        animateSlide(bookingTitle, 45, 335, 45, 375, 250);
+        animateSlide(bookingSubtitle, 45, 370, 45, 405, 300);
+        animateSlide(bookCard, 45, 420, 45, 490, 350);
+        animateSlide(myBookingsCard, 510, 420, 510, 490, 400);
+    }
+
+    // =====================================================
+    // ABOUT US VIEW
+    // Location + Laundry Schedule + Services in one card
+    // =====================================================
+
+    private void buildAboutView() {
+
+        JLabel title = new JLabel("About Us");
+        title.setFont(new Font("Georgia", Font.BOLD, 24));
+        title.setForeground(TEXT);
+        title.setBounds(45, 20, 300, 45);
+        aboutView.add(title);
+
+        JLabel subtitle = new JLabel(
+                "Everything you need to know about Lavandera Laundry Shop."
+        );
+        subtitle.setFont(new Font("Arial", Font.PLAIN, 13));
+        subtitle.setForeground(GRAY);
+        subtitle.setBounds(47, 58, 600, 30);
+        aboutView.add(subtitle);
+
+        aboutCard = createCard();
+        aboutCard.setBounds(45, 105, 900, 470);
+        aboutView.add(aboutCard);
+        designBounds(aboutCard);
+
+        JLabel shopName = new JLabel("Lavandera Laundry Shop");
+        shopName.setFont(new Font("Georgia", Font.BOLD, 22));
+        shopName.setForeground(PURPLE);
+        shopName.setBounds(40, 28, 600, 35);
+        aboutCard.add(shopName);
+
+        JLabel tagline = new JLabel("Your clothes deserve the best care.");
+        tagline.setFont(new Font("Arial", Font.PLAIN, 13));
+        tagline.setForeground(GRAY);
+        tagline.setBounds(40, 66, 600, 25);
+        aboutCard.add(tagline);
+
+        addAboutDivider(110);
+        addAboutSection(
+                135, "Location",
+                "Cagayan de Oro City, Misamis Oriental"
+        );
+
+        addAboutDivider(235);
+        addAboutSection(
+                260, "Laundry Schedule",
+                "Monday - Saturday   •   7:00 AM - 7:00 PM"
+        );
+
+        addAboutDivider(360);
+        addAboutSection(
+                385, "Lavandera Services",
+                "Wash • Dry • Fold "
+        );
+    }
+
+    /** One titled section (purple dot, heading and text) in the card. */
+    private void addAboutSection(int y, String heading, String body) {
+
+        DotPanel dot = new DotPanel();
+        dot.setBounds(40, y + 5, 16, 16);
+        aboutCard.add(dot);
+
+        JLabel headingLabel = createCardTitle(heading);
+        headingLabel.setFont(new Font("Arial", Font.BOLD, 16));
+        headingLabel.setBounds(70, y, 500, 26);
+        aboutCard.add(headingLabel);
+
+        JLabel bodyLabel = createCardText(body);
+        bodyLabel.setFont(new Font("Arial", Font.PLAIN, 14));
+        bodyLabel.setBounds(70, y + 32, 780, 26);
+        aboutCard.add(bodyLabel);
+    }
+
+    private void addAboutDivider(int y) {
+
+        JPanel line = new JPanel();
+        line.setBackground(LIGHT_PURPLE);
+        line.setBounds(40, y, 820, 1);
+        aboutCard.add(line);
+    }
+
+    // =====================================================
+    // NAVIGATION
+    // =====================================================
+
+    private void openBooking() {
+        new BookingPage(userName).setVisible(true);
+        dispose();
+    }
+
+    private void viewBookings() {
+        new MyBookingsPage(userName).setVisible(true);
+        dispose();
+    }
+
+    private void openProfile() {
+
+        try {
+            new ProfilePage(userName).setVisible(true);
+            dispose();
+
+        } catch (Exception ex) {
+            JOptionPane.showMessageDialog(this, "Unable to open profile.");
+        }
+    }
+
+    private void logout() {
+
+        int result = JOptionPane.showConfirmDialog(
+                this,
+                "Are you sure you want to logout?",
+                "Logout",
+                JOptionPane.YES_NO_OPTION
+        );
+
+        if (result == JOptionPane.YES_OPTION) {
+            new Login().setVisible(true);
+            dispose();
+        }
+    }
+
+    // =====================================================
+    // UI FACTORY HELPERS
+    // =====================================================
+
+    private RoundedPanel createCard() {
+        RoundedPanel card = new RoundedPanel(Color.WHITE, 12);
+        card.setLayout(null);
+        return card;
+    }
+
+    private JLabel createCardTitle(String text) {
+        JLabel label = new JLabel(text);
+        label.setFont(new Font("Arial", Font.BOLD, 15));
+        label.setForeground(TEXT);
+        return label;
+    }
+
+    private JLabel createCardText(String text) {
+        JLabel label = new JLabel(text);
+        label.setFont(new Font("Arial", Font.PLAIN, 12));
+        label.setForeground(GRAY);
+        return label;
+    }
+
+    private void addCardIcon(JPanel panel, int type, int x, int y) {
+        CardIcon icon = new CardIcon(type);
+        icon.setBounds(x, y, 48, 48);
+        panel.add(icon);
+    }
+
+    private JButton createPurpleButton(String text) {
+        JButton button = new JButton(text);
+        button.setFont(new Font("Arial", Font.BOLD, 12));
+        button.setForeground(Color.WHITE);
+        button.setBackground(PURPLE);
+        button.setBorderPainted(false);
+        button.setFocusPainted(false);
+        button.setCursor(new Cursor(Cursor.HAND_CURSOR));
+        return button;
+    }
+
+    private JButton createWhiteButton(String text) {
+        JButton button = new JButton(text);
+        button.setFont(new Font("Arial", Font.BOLD, 12));
+        button.setForeground(PURPLE);
+        button.setBackground(Color.WHITE);
+        button.setBorder(BorderFactory.createLineBorder(LIGHT_PURPLE));
+        button.setFocusPainted(false);
+        button.setCursor(new Cursor(Cursor.HAND_CURSOR));
+        return button;
+    }
+
+    private void addHover(JButton button, Color normal, Color hover) {
+
+        button.addMouseListener(new MouseAdapter() {
+            @Override
+            public void mouseEntered(MouseEvent e) {
+                button.setBackground(hover);
+            }
+
+            @Override
+            public void mouseExited(MouseEvent e) {
+                button.setBackground(normal);
+            }
+        });
+    }
+
+    // =====================================================
+    // ANIMATION
+    // =====================================================
+
+    /**
+     * The window can be resized, and ResponsiveUI scales every component
+     * from the bounds it was DESIGNED with. These helpers therefore move a
+     * component in design coordinates and let the layout scale it. (Moving
+     * it with setLocation() made the cards grow and overlap whenever the
+     * window was larger than 1200x750.)
+     */
+    private Rectangle designBounds(JComponent c) {
+
+        Object stored = c.getClientProperty("designBounds");
+
+        if (stored instanceof Rectangle) {
+            return (Rectangle) stored;
+        }
+
+        Rectangle b = c.getBounds();
+        double sx = 1.0;
+        double sy = 1.0;
+
+        // Before the window is shown the bounds are still the design ones.
+        if (isShowing() && getContentPane().getWidth() > 0) {
+            sx = getContentPane().getWidth() / 1200.0;
+            sy = getContentPane().getHeight() / 750.0;
+        }
+
+        Rectangle design = new Rectangle(
+                b.x, b.y,
+                (int) Math.round(b.width / sx),
+                (int) Math.round(b.height / sy)
+        );
+
+        c.putClientProperty("designBounds", design);
+        return design;
+    }
+
+    private void moveInDesign(JComponent c, Rectangle design, int x, int y) {
+
+        c.setBounds(x, y, design.width, design.height);
+
+        Container parent = c.getParent();
+
+        if (parent != null) {
+            parent.revalidate();
+        }
+    }
+
+    private void animateSlide(
+            JComponent component,
+            int finalX, int finalY,
+            int startX, int startY,
+            int delay
+    ) {
+        final Rectangle design = designBounds(component);
+
+        moveInDesign(component, design, startX, startY);
+
+        Timer timer = new Timer(15, null);
+        timer.setInitialDelay(delay);
+
+        final long[] startTime = {0};
+
+        timer.addActionListener(e -> {
+
+            if (startTime[0] == 0) {
+                startTime[0] = System.currentTimeMillis();
+            }
+
+            double progress =
+                    (System.currentTimeMillis() - startTime[0]) / 450.0;
+
+            if (progress >= 1) {
+                moveInDesign(component, design, finalX, finalY);
+                timer.stop();
+                return;
+            }
+
+            double eased = 1 - Math.pow(1 - progress, 3);
+
+            moveInDesign(
+                    component, design,
+                    (int) (startX + (finalX - startX) * eased),
+                    (int) (startY + (finalY - startY) * eased)
+            );
+        });
+
+        timer.start();
+    }
+
+    private void animateSidebar(JComponent component, int finalY, int delay) {
+
+        final Rectangle design = designBounds(component);
+        final int finalX = design.x;
+
+        moveInDesign(component, design, -230, finalY);
+
+        Timer timer = new Timer(15, null);
+        timer.setInitialDelay(delay);
+
+        final long[] startTime = {0};
+
+        timer.addActionListener(e -> {
+
+            if (startTime[0] == 0) {
+                startTime[0] = System.currentTimeMillis();
+            }
+
+            double progress =
+                    (System.currentTimeMillis() - startTime[0]) / 400.0;
+
+            if (progress >= 1) {
+                moveInDesign(component, design, finalX, finalY);
+                timer.stop();
+                return;
+            }
+
+            double eased = 1 - Math.pow(1 - progress, 3);
+
+            moveInDesign(
+                    component, design,
+                    (int) (-230 + (finalX + 230) * eased),
+                    finalY
+            );
+        });
+
+        timer.start();
+    }
+
+    // =====================================================
+    // CUSTOM PANELS
+    // =====================================================
+
+    /** Small drawn icon (no font needed, so it never shows as an empty box). */
+    private static class CardIcon extends JPanel {
+
+        static final int BOOK = 0;
+        static final int LIST = 1;
+
+        private final int type;
+
+        CardIcon(int type) {
+            this.type = type;
+            setOpaque(false);
+        }
+
+        @Override
+        protected void paintComponent(Graphics g) {
+
+            Graphics2D g2 = (Graphics2D) g.create();
+
+            g2.setRenderingHint(
+                    RenderingHints.KEY_ANTIALIASING,
+                    RenderingHints.VALUE_ANTIALIAS_ON
+            );
+
+            int w = getWidth();
+            int h = getHeight();
+
+            g2.setColor(LIGHT_PURPLE);
+            g2.fillRoundRect(0, 0, w, h, 14, 14);
+
+            g2.setColor(PURPLE);
+            g2.setStroke(new BasicStroke(
+                    Math.max(2f, w / 16f),
+                    BasicStroke.CAP_ROUND,
+                    BasicStroke.JOIN_ROUND
+            ));
+
+            if (type == BOOK) {
+                // calendar with a plus
+                int x = w * 26 / 100;
+                int y = h * 30 / 100;
+                int cw = w * 48 / 100;
+                int ch = h * 44 / 100;
+
+                g2.drawRoundRect(x, y, cw, ch, 6, 6);
+                g2.drawLine(x, y + ch * 28 / 100, x + cw, y + ch * 28 / 100);
+                g2.drawLine(x + cw * 28 / 100, y - h * 6 / 100,
+                        x + cw * 28 / 100, y + h * 5 / 100);
+                g2.drawLine(x + cw * 72 / 100, y - h * 6 / 100,
+                        x + cw * 72 / 100, y + h * 5 / 100);
+
+                int cx = x + cw / 2;
+                int cy = y + ch * 64 / 100;
+                int r = Math.max(3, cw / 8);
+                g2.drawLine(cx - r, cy, cx + r, cy);
+                g2.drawLine(cx, cy - r, cx, cy + r);
+
+            } else {
+                // list with three rows
+                for (int i = 0; i < 3; i++) {
+                    int ly = h * 32 / 100 + i * h * 18 / 100;
+                    int dot = Math.max(3, w / 14);
+
+                    g2.fillOval(w * 28 / 100 - dot / 2, ly - dot / 2, dot, dot);
+                    g2.drawLine(w * 42 / 100, ly, w * 74 / 100, ly);
+                }
+            }
+
+            g2.dispose();
+        }
+    }
+
+    private static class RoundedPanel extends JPanel {
+
+        private final Color color;
+        private final int radius;
+
+        RoundedPanel(Color color, int radius) {
+            this.color = color;
+            this.radius = radius;
+            setOpaque(false);
+        }
+
+        @Override
+        protected void paintComponent(Graphics g) {
+
+            Graphics2D g2 = (Graphics2D) g.create();
+
+            g2.setRenderingHint(
+                    RenderingHints.KEY_ANTIALIASING,
+                    RenderingHints.VALUE_ANTIALIAS_ON
+            );
+
+            g2.setColor(color);
+            g2.fillRoundRect(0, 0, getWidth(), getHeight(), radius, radius);
+            g2.dispose();
+
+            super.paintComponent(g);
+        }
+    }
+
+    /** Small purple dot used as a bullet in the About Us sections. */
+    private static class DotPanel extends JPanel {
+
+        DotPanel() {
+            setOpaque(false);
+        }
+
+        @Override
+        protected void paintComponent(Graphics g) {
+
+            super.paintComponent(g);
+
+            Graphics2D g2 = (Graphics2D) g.create();
+
+            g2.setRenderingHint(
+                    RenderingHints.KEY_ANTIALIASING,
+                    RenderingHints.VALUE_ANTIALIAS_ON
+            );
+
+            g2.setColor(PURPLE);
+            g2.fillOval(0, 0, getWidth(), getHeight());
+            g2.dispose();
+        }
+    }
+
+    // =====================================================
+    // LOGOS
+    // =====================================================
+
+    private static class LogoPanel extends JPanel {
+
+        LogoPanel() {
+            setOpaque(false);
+        }
+
+        @Override
+        protected void paintComponent(Graphics g) {
+
+            super.paintComponent(g);
+
+            Graphics2D g2 = (Graphics2D) g.create();
+
+            g2.setRenderingHint(
+                    RenderingHints.KEY_ANTIALIASING,
+                    RenderingHints.VALUE_ANTIALIAS_ON
+            );
+
+            // Outer circle
+            g2.setColor(new Color(180, 145, 205));
+            g2.fillOval(5, 5, 200, 160);
+
+            // White circle border
+            g2.setColor(Color.WHITE);
+            g2.setStroke(new BasicStroke(3));
+            g2.drawOval(12, 12, 186, 146);
+
+            // Inner circle
+            g2.setColor(new Color(175, 140, 200));
+            g2.fillOval(18, 18, 174, 134);
+
+            // Inner white border
+            g2.setColor(Color.WHITE);
+            g2.setStroke(new BasicStroke(2));
+            g2.drawOval(22, 22, 166, 126);
+
+            // Drop
+            g2.setColor(Color.WHITE);
+
+            Path2D drop = new Path2D.Double();
+            drop.moveTo(105, 35);
+            drop.curveTo(85, 55, 78, 65, 78, 75);
+            drop.curveTo(78, 92, 92, 102, 105, 102);
+            drop.curveTo(118, 102, 132, 92, 132, 75);
+            drop.curveTo(132, 65, 125, 55, 105, 35);
+            drop.closePath();
+            g2.fill(drop);
+
+            // Lavandera
+            g2.setFont(new Font("Georgia", Font.BOLD, 20));
+            g2.drawString("Lavandera", 45, 125);
+
+            // Laundry Shop
+            g2.setFont(new Font("Arial", Font.PLAIN, 10));
+            g2.drawString("Laundry Shop", 72, 145);
+
+            g2.dispose();
+        }
+    }
+
+    private static class SmallLogoPanel extends JPanel {
+
+        SmallLogoPanel() {
+            setOpaque(false);
+        }
+
+        @Override
+        protected void paintComponent(Graphics g) {
+
+            super.paintComponent(g);
+
+            Graphics2D g2 = (Graphics2D) g.create();
+
+            g2.setRenderingHint(
+                    RenderingHints.KEY_ANTIALIASING,
+                    RenderingHints.VALUE_ANTIALIAS_ON
+            );
+
+            g2.setColor(new Color(180, 145, 205));
+            g2.fillOval(5, 5, 155, 155);
+
+            g2.setColor(Color.WHITE);
+            g2.setStroke(new BasicStroke(3));
+            g2.drawOval(12, 12, 141, 141);
+
+            Path2D drop = new Path2D.Double();
+            drop.moveTo(82, 32);
+            drop.curveTo(62, 52, 55, 63, 55, 75);
+            drop.curveTo(55, 91, 68, 101, 82, 101);
+            drop.curveTo(96, 101, 109, 91, 109, 75);
+            drop.curveTo(109, 63, 102, 52, 82, 32);
+            drop.closePath();
+            g2.fill(drop);
+
+            g2.setFont(new Font("Georgia", Font.BOLD, 16));
+            g2.drawString("Lavandera", 43, 125);
+
+            g2.dispose();
+        }
+    }
+
+    // =====================================================
+    // MAIN (for testing this page on its own)
+    // =====================================================
+
+    public static void main(String[] args) {
+
+        SwingUtilities.invokeLater(() ->
+                new HomePagee("CALIMPONG, BRENTL.").setVisible(true)
+        );
+    }
+}

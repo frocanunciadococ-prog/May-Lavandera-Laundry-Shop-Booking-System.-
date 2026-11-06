@@ -1,0 +1,2998 @@
+package laundryshop_bookingsystem;
+
+import javax.imageio.ImageIO;
+import javax.swing.*;
+import javax.swing.border.EmptyBorder;
+import javax.swing.event.DocumentEvent;
+import javax.swing.event.DocumentListener;
+import javax.swing.text.AbstractDocument;
+import javax.swing.text.AttributeSet;
+import javax.swing.text.BadLocationException;
+import javax.swing.text.DocumentFilter;
+import javax.swing.table.DefaultTableModel;
+import javax.swing.table.DefaultTableCellRenderer;
+import javax.swing.table.JTableHeader;
+import javax.swing.table.TableCellRenderer;
+import java.awt.*;
+import java.awt.event.*;
+import java.awt.geom.Arc2D;
+import java.awt.geom.Ellipse2D;
+import java.awt.image.BufferedImage;
+import java.awt.print.PageFormat;
+import java.awt.print.Printable;
+import java.awt.print.PrinterException;
+import java.awt.print.PrinterJob;
+import java.io.File;
+import java.io.IOException;
+import java.sql.*;
+import java.time.DayOfWeek;
+import java.time.LocalDate;
+import java.time.YearMonth;
+import java.time.format.DateTimeFormatter;
+import java.time.format.DateTimeParseException;
+import java.time.format.TextStyle;
+import java.time.temporal.TemporalAdjusters;
+import java.util.ArrayList;
+import java.util.Locale;
+import java.util.function.Consumer;
+
+/**
+ * Dashboard for Admin and Staff users.
+ *
+ * <p>Shows booking summary counts, a searchable list of bookings and
+ * reports, and lets authorised users change a booking's payment status.</p>
+ *
+ * <p>Role differences: only an Admin can open Staff Accounts. Admin and
+ * Staff both see the customer's full name.</p>
+ *
+ * <p>Each active booking can be marked Paid / Not Paid and marked Done
+ * (finished laundering) - the customer is notified when it is Done.
+ * Bookings cancelled by the customer show "Cancelled by customer"
+ * instead of the action buttons.</p>
+ *
+ * <p>The Reports / History page is a full "Shop Reports" screen with a
+ * filter panel, a metrics summary, a status chart and a transaction
+ * table. Every booking card on the Booking Overview has a Create Receipt
+ * button for the customer's booking.</p>
+ *
+ * <p>Note: a booking date is the SCHEDULED laundry date, so it is often
+ * in the future. The default report range therefore covers the whole
+ * current month (not just up to today) so upcoming bookings show up.</p>
+ */
+public class AdminBookingsPage extends JFrame {
+
+    // ================= ROLES AND STATUS VALUES =================
+    private static final String ROLE_ADMIN = "Admin";
+    private static final String ROLE_STAFF = "Staff";
+
+    private static final String ACTIVE_ACCOUNT_SQL =
+            "SELECT COUNT(*) FROM users "
+            + "WHERE full_name = ? AND LOWER(role) = LOWER(?) "
+            + "AND is_archived = 0";
+
+    private static final String PAYMENT_PAID = "Paid";
+    private static final String PAYMENT_NOT_PAID = "Not Paid";
+
+    private static final String STATUS_DONE = "Done";
+    private static final String STATUS_CANCELLED = "Cancelled";
+
+
+    // ================= COLORS =================
+    private static final Color PURPLE = new Color(105, 55, 145);
+    private static final Color LIGHT_PURPLE = new Color(220, 205, 235);
+    private static final Color VERY_LIGHT_PURPLE = new Color(245, 239, 248);
+    private static final Color TEXT = new Color(55, 45, 65);
+    private static final Color GRAY = new Color(110, 105, 115);
+    private static final Color BACKGROUND = new Color(248, 245, 250);
+    private static final Color GREEN = new Color(40, 140, 80);
+    private static final Color RED = new Color(190, 65, 65);
+    private static final Color AMBER = new Color(205, 140, 20);
+    private static final Color SELECTED_MENU = new Color(125, 80, 160);
+
+    // Reports page extras (same purple family as the rest of the system)
+    private static final Color CARD_BORDER = new Color(232, 225, 240);
+    private static final Color FIELD_BG = new Color(250, 248, 252);
+    private static final Color ROW_SELECTED = new Color(240, 232, 246);
+    private static final Color GREEN_SOFT = new Color(232, 245, 237);
+    private static final Color GREEN_BORDER = new Color(184, 224, 200);
+    private static final Color RED_SOFT = new Color(250, 235, 235);
+    private static final Color RED_BORDER = new Color(238, 202, 202);
+    private static final Color AMBER_SOFT = new Color(252, 243, 224);
+    private static final Color AMBER_BORDER = new Color(240, 215, 160);
+    private static final Font FONT_HINT_REPORT = new Font("Arial", Font.PLAIN, 11);
+
+    private JPanel dashboard;
+    private JPanel bookingsPanel;
+    private JPanel cardsContainer;
+    private JScrollPane bookingsScroll;
+
+    private JTextField searchField;
+
+    private JLabel totalBookingsLabel;
+    private JLabel pendingBookingsLabel;
+    private JLabel paidBookingsLabel;
+    private JLabel unpaidBookingsLabel;
+
+    // My Profile page (built once, filled with data each time it opens)
+    private JPanel profilePanel;
+    private JPanel profileAvatar;
+    private JLabel profileNameLabel;
+    private JLabel profileRoleLabel;
+    private JLabel profileUserLabel;
+    private JLabel profileFirstName;
+    private JLabel profileLastName;
+    private JLabel profileUsernameValue;
+    private JLabel profileEmail;
+    private JLabel profileRoleValue;
+    private JLabel profileSince;
+    private String profileInitials = "?";
+
+    // Shop Reports page (built once, refreshed each time it opens)
+    private JPanel reportsPanel;
+    private JTextField reportFromField;
+    private JTextField reportToField;
+    private JTextField reportSearchField;
+    private JComboBox<String> reportTypeBox;
+    private JLabel reportPeriodLabel;
+    private JLabel metricSales;
+    private JLabel metricBookings;
+    private JLabel metricCompleted;
+    private JLabel metricCancelled;
+    private JLabel metricUnpaid;
+    private DonutChart donutChart;
+    private DefaultTableModel reportModel;
+    private JTable reportTable;
+    private String reportPeriodText = "All Available Historical Data";
+
+    /** Every row loaded for the chosen dates (before type/search filters). */
+    private final java.util.List<ReportRow> reportRows = new ArrayList<>();
+
+    /** Rows currently shown (after type/search filters); used by exports. */
+    private final java.util.List<ReportRow> shownRows = new ArrayList<>();
+
+    // Sidebar buttons, so the open page can be highlighted
+    private final java.util.List<JButton> menuButtons = new ArrayList<>();
+    private JButton selectedMenu;
+    private JButton dashButton;
+    private JButton reportsButton;
+    private JButton profileButton;
+
+    private String userName;
+    private String role;
+
+    // ================= CONSTRUCTOR =================
+    public AdminBookingsPage(String userName, String role) {
+        this.userName = userName;
+        this.role = role == null ? ROLE_STAFF : role;
+
+        setTitle("Lavandera - Admin Dashboard");
+        setSize(1200, 750);
+        setDefaultCloseOperation(JFrame.EXIT_ON_CLOSE);
+        setLocationRelativeTo(null);
+        setResizable(true);
+        setLayout(null);
+        getContentPane().setBackground(BACKGROUND);
+
+        createSidebar();
+        createDashboard();
+        createProfilePanel();
+        createReportsPanel();
+
+        loadBookings();
+        updateSummary();
+
+        ResponsiveUI.enable(this, 1200, 750);
+
+        setVisible(true);
+    }
+
+    /**
+     * Opens the dashboard directly on another page.
+     *
+     * @param startPage {@code "reports"} or {@code "profile"}; anything
+     *                  else keeps the Booking Overview
+     */
+    public AdminBookingsPage(String userName, String role, String startPage) {
+        this(userName, role);
+
+        if ("reports".equals(startPage)) {
+            showReports();
+        } else if ("profile".equals(startPage)) {
+            showProfile();
+        }
+    }
+
+    // ================= SIDEBAR =================
+    private void createSidebar() {
+        JPanel sidebar = new JPanel(null);
+        sidebar.setBackground(PURPLE);
+        sidebar.setBounds(0, 0, 225, 750);
+        add(sidebar);
+
+        JLabel logo = new JLabel("Lavandera", SwingConstants.CENTER);
+        logo.setFont(new Font("Arial", Font.BOLD, 27));
+        logo.setForeground(Color.WHITE);
+        logo.setBounds(15, 25, 195, 40);
+        sidebar.add(logo);
+
+        JLabel subtitle = new JLabel("Laundry Shop", SwingConstants.CENTER);
+        subtitle.setFont(new Font("Arial", Font.PLAIN, 14));
+        subtitle.setForeground(LIGHT_PURPLE);
+        subtitle.setBounds(15, 65, 195, 25);
+        sidebar.add(subtitle);
+
+        JSeparator separator = new JSeparator();
+        separator.setForeground(LIGHT_PURPLE);
+        separator.setBounds(20, 105, 185, 1);
+        sidebar.add(separator);
+
+        JLabel userLabel = new JLabel(
+                "<html><center>" + escapeHtml(userName)
+                + "<br><font color='#DCCDEB'>"
+                + escapeHtml(role.toUpperCase(Locale.ROOT))
+                + "</font></center></html>",
+                SwingConstants.CENTER
+        );
+        userLabel.setForeground(Color.WHITE);
+        userLabel.setFont(new Font("Arial", Font.BOLD, 14));
+        userLabel.setBounds(10, 125, 205, 55);
+        sidebar.add(userLabel);
+
+        dashButton = addMenuButton(sidebar, "Booking Overview",
+                205, true, this::showDashboard);
+        reportsButton = addMenuButton(sidebar, "Reports / History",
+                260, false, this::showReports);
+        profileButton = addMenuButton(sidebar, "My Profile", 315, false,
+                this::showProfile);
+
+        // Only an Admin can manage staff accounts
+        if (isAdmin()) {
+            addMenuButton(sidebar, "Staff Accounts", 370, false, () -> {
+                new Staffmanagement(userName, role).setVisible(true);
+                dispose();
+            });
+        }
+
+        addMenuButton(sidebar, "Logout", 640, false, () -> {
+            int choice = JOptionPane.showConfirmDialog(
+                    this,
+                    "Are you sure you want to log out?",
+                    "Confirm Logout",
+                    JOptionPane.YES_NO_OPTION
+            );
+
+            if (choice == JOptionPane.YES_OPTION) {
+                dispose();
+                new Login().setVisible(true);
+            }
+        });
+
+        JLabel slogan = new JLabel(
+                "<html><center>Clean Clothes,<br>Happy Life.</center></html>",
+                SwingConstants.CENTER
+        );
+        slogan.setFont(new Font("Arial", Font.ITALIC, 13));
+        slogan.setForeground(LIGHT_PURPLE);
+        slogan.setBounds(15, 690, 195, 40);
+        sidebar.add(slogan);
+    }
+
+    private JButton addMenuButton(
+            JPanel parent,
+            String text,
+            int y,
+            boolean selected,
+            Runnable action
+    ) {
+        JButton button = new JButton(text);
+        button.setBounds(15, y, 195, 42);
+        button.setFont(new Font("Arial", Font.BOLD, 14));
+        button.setForeground(Color.WHITE);
+        button.setBackground(selected ? SELECTED_MENU : PURPLE);
+        button.setBorderPainted(false);
+        button.setFocusPainted(false);
+        button.setCursor(new Cursor(Cursor.HAND_CURSOR));
+        button.setHorizontalAlignment(SwingConstants.LEFT);
+        button.setBorder(new EmptyBorder(0, 20, 0, 0));
+
+        if (selected) {
+            selectedMenu = button;
+        }
+        menuButtons.add(button);
+
+        button.addMouseListener(new MouseAdapter() {
+            @Override
+            public void mouseEntered(MouseEvent e) {
+                button.setBackground(new Color(135, 90, 170));
+            }
+
+            @Override
+            public void mouseExited(MouseEvent e) {
+                button.setBackground(button == selectedMenu
+                        ? SELECTED_MENU : PURPLE);
+            }
+        });
+
+        button.addActionListener(e -> action.run());
+        parent.add(button);
+        return button;
+    }
+
+    /** Highlights the sidebar button of the page that is open. */
+    private void selectMenu(JButton active) {
+        selectedMenu = active;
+
+        for (JButton b : menuButtons) {
+            b.setBackground(b == active ? SELECTED_MENU : PURPLE);
+        }
+    }
+
+    // ================= DASHBOARD =================
+    private void createDashboard() {
+        dashboard = new JPanel(null);
+        dashboard.setBackground(BACKGROUND);
+        dashboard.setBounds(240, 15, 940, 690);
+        add(dashboard);
+
+        JLabel title = new JLabel("Admin Dashboard");
+        title.setFont(new Font("Arial", Font.BOLD, 28));
+        title.setForeground(TEXT);
+        title.setBounds(10, 5, 450, 40);
+        dashboard.add(title);
+
+        JLabel subtitle = new JLabel(
+                "Manage laundry bookings and payment reports"
+        );
+        subtitle.setFont(new Font("Arial", Font.PLAIN, 14));
+        subtitle.setForeground(GRAY);
+        subtitle.setBounds(12, 45, 600, 25);
+        dashboard.add(subtitle);
+
+        searchField = new JTextField();
+        searchField.setFont(new Font("Arial", Font.PLAIN, 14));
+        searchField.setBounds(10, 85, 690, 38);
+        searchField.setBorder(
+                BorderFactory.createCompoundBorder(
+                        BorderFactory.createLineBorder(LIGHT_PURPLE),
+                        new EmptyBorder(5, 10, 5, 10)
+                )
+        );
+        searchField.setToolTipText(
+                "Search by booking ID, customer name, or service");
+        dashboard.add(searchField);
+
+        JButton searchButton = new JButton("Search");
+        styleButton(searchButton);
+        searchButton.setBounds(710, 85, 100, 38);
+        searchButton.addActionListener(e -> {
+            if (guardActiveAccount()) {
+                loadBookings();
+            }
+        });
+        dashboard.add(searchButton);
+
+        JButton refreshButton = new JButton("Refresh");
+        styleButton(refreshButton);
+        refreshButton.setBounds(820, 85, 105, 38);
+        refreshButton.addActionListener(e -> {
+            if (!guardActiveAccount()) {
+                return;
+            }
+
+            searchField.setText("");
+            loadBookings();
+            updateSummary();
+        });
+        dashboard.add(refreshButton);
+
+        totalBookingsLabel = createSummaryCard(
+                "Total Bookings", "0", 10, 140
+        );
+
+        pendingBookingsLabel = createSummaryCard(
+                "Pending Bookings", "0", 240, 140
+        );
+
+        paidBookingsLabel = createSummaryCard(
+                "Paid Bookings", "0", 470, 140
+        );
+
+        unpaidBookingsLabel = createSummaryCard(
+                "Unpaid Bookings", "0", 700, 140
+        );
+
+        JLabel bookingTitle = new JLabel("Booking Records");
+        bookingTitle.setFont(new Font("Arial", Font.BOLD, 20));
+        bookingTitle.setForeground(TEXT);
+        bookingTitle.setBounds(10, 260, 400, 30);
+        dashboard.add(bookingTitle);
+
+        bookingsPanel = new JPanel(new BorderLayout());
+        bookingsPanel.setBackground(BACKGROUND);
+        bookingsPanel.setBounds(10, 300, 915, 375);
+        dashboard.add(bookingsPanel);
+
+        cardsContainer = new WidthTrackingPanel();
+        cardsContainer.setLayout(new BoxLayout(cardsContainer, BoxLayout.Y_AXIS));
+        cardsContainer.setBackground(BACKGROUND);
+        cardsContainer.setBorder(new EmptyBorder(5, 5, 5, 5));
+
+        bookingsScroll = new JScrollPane(cardsContainer);
+        bookingsScroll.setBorder(BorderFactory.createEmptyBorder());
+        bookingsScroll.getViewport().setBackground(BACKGROUND);
+        bookingsScroll.getVerticalScrollBar().setUnitIncrement(16);
+        bookingsScroll.setHorizontalScrollBarPolicy(
+                ScrollPaneConstants.HORIZONTAL_SCROLLBAR_NEVER);
+
+        bookingsPanel.add(bookingsScroll, BorderLayout.CENTER);
+    }
+
+    private JLabel createSummaryCard(
+            String title,
+            String value,
+            int x,
+            int y
+    ) {
+        JPanel card = new RoundPanel(Color.WHITE, 18);
+        card.setLayout(null);
+        card.setBounds(x, y, 215, 100);
+
+        JLabel titleLabel = new JLabel(title);
+        titleLabel.setFont(new Font("Arial", Font.PLAIN, 13));
+        titleLabel.setForeground(GRAY);
+        titleLabel.setBounds(15, 12, 190, 22);
+        card.add(titleLabel);
+
+        JLabel numberLabel = new JLabel(value);
+        numberLabel.setFont(new Font("Arial", Font.BOLD, 28));
+        numberLabel.setForeground(PURPLE);
+        numberLabel.setBounds(15, 38, 190, 40);
+        card.add(numberLabel);
+
+        dashboard.add(card);
+        return numberLabel;
+    }
+
+    private void styleButton(JButton button) {
+        button.setBackground(PURPLE);
+        button.setForeground(Color.WHITE);
+        button.setFont(new Font("Arial", Font.BOLD, 13));
+        button.setFocusPainted(false);
+        button.setBorderPainted(false);
+        button.setCursor(new Cursor(Cursor.HAND_CURSOR));
+    }
+
+    // ================= ROLE HELPERS =================
+    private boolean isAdmin() {
+        return ROLE_ADMIN.equalsIgnoreCase(role);
+    }
+
+    private boolean isStaff() {
+        return ROLE_STAFF.equalsIgnoreCase(role);
+    }
+
+    /** Admin and Staff may change a booking's payment status. */
+    private boolean canManagePayments() {
+        return isAdmin() || isStaff();
+    }
+
+    // The customer's full name is shown to both Admin and Staff.
+    private String displayName(String customer) {
+        return customer;
+    }
+
+    // ================= LOAD BOOKINGS =================
+    private void loadBookings() {
+        cardsContainer.removeAll();
+
+        String search = searchField == null
+                ? "" : searchField.getText().trim();
+
+        String sql =
+                "SELECT booking_id, username, service, booking_date, "
+                + "booking_time, booking_status, payment_status, "
+                + "quantity, weight, amount "
+                + "FROM tbl_bookings "
+                + "WHERE CAST(booking_id AS CHAR) LIKE ? "
+                + "OR username LIKE ? "
+                + "OR service LIKE ? "
+                + "ORDER BY booking_id DESC";
+
+        int count = 0;
+
+        try (Connection con = requireConnection();
+             PreparedStatement pst = con.prepareStatement(sql)) {
+
+            String keyword = "%" + search + "%";
+            pst.setString(1, keyword);
+            pst.setString(2, keyword);
+            pst.setString(3, keyword);
+
+            try (ResultSet rs = pst.executeQuery()) {
+                while (rs.next()) {
+                    cardsContainer.add(createBookingCard(
+                            rs.getInt("booking_id"),
+                            safe(displayName(rs.getString("username"))),
+                            safe(rs.getString("service")),
+                            safe(rs.getString("booking_date")),
+                            safe(rs.getString("booking_time")),
+                            safe(rs.getString("booking_status")),
+                            safe(rs.getString("payment_status")),
+                            rs.getString("quantity"),
+                            rs.getDouble("weight"),
+                            rs.getDouble("amount")
+                    ));
+
+                    cardsContainer.add(Box.createVerticalStrut(10));
+                    count++;
+                }
+            }
+
+            if (count == 0) {
+                JLabel emptyLabel = new JLabel(
+                        "No booking records found.",
+                        SwingConstants.CENTER
+                );
+                emptyLabel.setFont(new Font("Arial", Font.PLAIN, 16));
+                emptyLabel.setForeground(GRAY);
+                emptyLabel.setAlignmentX(Component.CENTER_ALIGNMENT);
+                cardsContainer.add(Box.createVerticalStrut(40));
+                cardsContainer.add(emptyLabel);
+            }
+
+        } catch (SQLException e) {
+            showDatabaseError(e);
+        }
+
+        cardsContainer.revalidate();
+        cardsContainer.repaint();
+    }
+
+    private JPanel createBookingCard(
+            int bookingId,
+            String username,
+            String service,
+            String date,
+            String time,
+            String bookingStatus,
+            String paymentStatus,
+            String quantity,
+            double weight,
+            double amount
+    ) {
+        // Labels are created first; the card positions them itself
+        // (see doLayout below) so it works at ANY window width.
+        final JLabel idLabel = new JLabel("Booking #" + bookingId);
+        idLabel.setFont(new Font("Arial", Font.BOLD, 16));
+        idLabel.setForeground(PURPLE);
+
+        final JLabel customerLabel = new JLabel("Customer: " + username);
+        customerLabel.setFont(new Font("Arial", Font.PLAIN, 13));
+        customerLabel.setForeground(TEXT);
+
+        final JLabel serviceLabel = new JLabel("Service: " + service);
+        serviceLabel.setFont(new Font("Arial", Font.PLAIN, 13));
+        serviceLabel.setForeground(TEXT);
+
+        final JLabel dateLabel = new JLabel(
+                "Date: " + date + "  |  Time: " + time);
+        dateLabel.setFont(new Font("Arial", Font.PLAIN, 13));
+        dateLabel.setForeground(TEXT);
+
+        final JLabel amountLabel = new JLabel(
+                "Amount: \u20B1" + String.format("%,.2f", amount)
+        );
+        amountLabel.setFont(new Font("Arial", Font.BOLD, 14));
+        amountLabel.setForeground(PURPLE);
+
+        final JLabel bookingLabel = new JLabel("Booking: " + bookingStatus);
+        bookingLabel.setFont(new Font("Arial", Font.PLAIN, 13));
+        bookingLabel.setForeground(TEXT);
+
+        final JLabel paymentLabel = new JLabel("Payment: " + paymentStatus);
+        paymentLabel.setFont(new Font("Arial", Font.BOLD, 13));
+        paymentLabel.setForeground(
+                PAYMENT_PAID.equalsIgnoreCase(paymentStatus) ? GREEN : RED
+        );
+
+        // Right-hand column: two action slots (top / bottom).
+        final JComponent[] action = new JComponent[2];
+        final boolean cancelled =
+                STATUS_CANCELLED.equalsIgnoreCase(bookingStatus);
+
+        // A booking cancelled by the customer has nothing left to pay
+        // or finish, so the action buttons are replaced by a label.
+        if (cancelled) {
+            JLabel cancelledLabel = new JLabel(
+                    "Cancelled by customer", SwingConstants.CENTER
+            );
+            cancelledLabel.setFont(new Font("Arial", Font.BOLD, 13));
+            cancelledLabel.setForeground(RED);
+            action[0] = cancelledLabel;
+
+        } else {
+            // Only staff/admin users should be able to change a booking.
+            boolean actionsAllowed = canManagePayments();
+
+            JButton paymentButton = new JButton(
+                    PAYMENT_PAID.equalsIgnoreCase(paymentStatus)
+                    ? "Unpaid" : " Paid"
+            );
+            styleButton(paymentButton);
+            paymentButton.setEnabled(actionsAllowed);
+
+            paymentButton.addActionListener(e -> {
+                String newStatus = PAYMENT_PAID.equalsIgnoreCase(paymentStatus)
+                        ? PAYMENT_NOT_PAID : PAYMENT_PAID;
+
+                int confirm = JOptionPane.showConfirmDialog(
+                        this,
+                        "Change payment status to " + newStatus + "?",
+                        "Confirm Payment Update",
+                        JOptionPane.YES_NO_OPTION
+                );
+
+                if (confirm == JOptionPane.YES_OPTION) {
+                    updatePayment(bookingId, newStatus);
+                }
+            });
+
+            action[0] = paymentButton;
+
+            if (STATUS_DONE.equalsIgnoreCase(bookingStatus)) {
+                // "Dialog" font has the check mark; Arial shows a box.
+                JLabel doneLabel = new JLabel(
+                        "\u2713 Done", SwingConstants.CENTER
+                );
+                doneLabel.setFont(new Font("Dialog", Font.BOLD, 14));
+                doneLabel.setForeground(GREEN);
+                action[1] = doneLabel;
+
+            } else {
+                JButton doneButton = new JButton("Done");
+                styleButton(doneButton);
+                doneButton.setBackground(GREEN);
+                doneButton.setEnabled(actionsAllowed);
+
+                doneButton.addActionListener(e -> {
+                    int confirm = JOptionPane.showConfirmDialog(
+                            this,
+                            "Mark Booking #" + bookingId + " as done?\n"
+                            + "The customer will be notified that their "
+                            + "laundry is finished.",
+                            "Confirm Done",
+                            JOptionPane.YES_NO_OPTION
+                    );
+
+                    if (confirm == JOptionPane.YES_OPTION) {
+                        markDone(bookingId);
+                    }
+                });
+
+                action[1] = doneButton;
+            }
+        }
+
+        // "Create Receipt" sits under the payment line. A cancelled
+        // booking has nothing to pay, so it gets no receipt.
+        final RoundButton[] receiptButton = new RoundButton[1];
+
+        if (!cancelled) {
+            RoundButton receipt = new RoundButton("Create Receipt",
+                    VERY_LIGHT_PURPLE, LIGHT_PURPLE, PURPLE, LIGHT_PURPLE);
+            receipt.setFont(new Font("Arial", Font.BOLD, 11));
+
+            receipt.addActionListener(e -> showReceipt(new ReportRow(
+                    bookingId, username, service, date, time,
+                    bookingStatus, paymentStatus,
+                    quantity == null ? "" : quantity,
+                    weight, amount)));
+
+            receiptButton[0] = receipt;
+        }
+
+        // The card re-positions everything from its own width, so the
+        // action buttons stay pinned to the right edge and nothing is cut
+        // off when the window is smaller than maximized.
+        JPanel card = new RoundPanel(Color.WHITE, 16) {
+            @Override
+            public void doLayout() {
+                int w = getWidth();
+
+                int actionW = 155;
+                int actionX = Math.max(0, w - actionW - 20);
+                int midX = Math.max(260, actionX - 195);
+                int leftW = Math.max(100, midX - 25);
+
+                idLabel.setBounds(15, 10, leftW, 25);
+                customerLabel.setBounds(15, 38, leftW, 22);
+                serviceLabel.setBounds(15, 62, leftW, 22);
+                dateLabel.setBounds(15, 86, leftW, 22);
+
+                amountLabel.setBounds(midX, 12, 180, 25);
+                bookingLabel.setBounds(midX, 43, 180, 22);
+                paymentLabel.setBounds(midX, 68, 180, 22);
+
+                if (receiptButton[0] != null) {
+                    receiptButton[0].setBounds(midX, 98, 125, 26);
+                }
+
+                if (cancelled) {
+                    action[0].setBounds(actionX - 10, 48, actionW + 20, 35);
+                } else {
+                    action[0].setBounds(actionX, 25, actionW, 35);
+                    action[1].setBounds(actionX, 75, actionW, 35);
+                }
+            }
+        };
+
+        card.setLayout(null);
+        card.setPreferredSize(new Dimension(865, 135));
+        card.setMaximumSize(new Dimension(Integer.MAX_VALUE, 135));
+        card.setMinimumSize(new Dimension(300, 135));
+
+        card.add(idLabel);
+        card.add(customerLabel);
+        card.add(serviceLabel);
+        card.add(dateLabel);
+        card.add(amountLabel);
+        card.add(bookingLabel);
+        card.add(paymentLabel);
+
+        for (JComponent c : action) {
+            if (c != null) {
+                card.add(c);
+            }
+        }
+
+        if (receiptButton[0] != null) {
+            card.add(receiptButton[0]);
+        }
+
+        return card;
+    }
+
+    // ================= MARK DONE + NOTIFY CUSTOMER =================
+    private void markDone(int bookingId) {
+        if (!guardActiveAccount()) {
+            return;
+        }
+
+        if (!canManagePayments()) {
+            JOptionPane.showMessageDialog(
+                    this,
+                    "You are not allowed to update this booking.",
+                    "Access Denied",
+                    JOptionPane.WARNING_MESSAGE
+            );
+            return;
+        }
+
+        try (Connection con = requireConnection()) {
+
+            CustomerNotifications.ensureTable(con);
+
+            String customer;
+            String service;
+
+            try (PreparedStatement pst = con.prepareStatement(
+                    "SELECT username, service, booking_status "
+                    + "FROM tbl_bookings WHERE booking_id = ?")) {
+
+                pst.setInt(1, bookingId);
+
+                try (ResultSet rs = pst.executeQuery()) {
+                    if (!rs.next()) {
+                        JOptionPane.showMessageDialog(
+                                this,
+                                "Booking record was not found."
+                        );
+                        return;
+                    }
+
+                    customer = rs.getString("username");
+                    service = safe(rs.getString("service"));
+
+                    if (STATUS_CANCELLED.equalsIgnoreCase(
+                            rs.getString("booking_status"))) {
+                        JOptionPane.showMessageDialog(
+                                this,
+                                "This booking was cancelled by the customer."
+                        );
+                        loadBookings();
+                        updateSummary();
+                        return;
+                    }
+                }
+            }
+
+            int updated;
+
+            try (PreparedStatement pst = con.prepareStatement(
+                    "UPDATE tbl_bookings SET booking_status = ? "
+                    + "WHERE booking_id = ? "
+                    + "AND LOWER(booking_status) <> 'cancelled'")) {
+
+                pst.setString(1, STATUS_DONE);
+                pst.setInt(2, bookingId);
+                updated = pst.executeUpdate();
+            }
+
+            if (updated > 0) {
+                CustomerNotifications.add(
+                        con,
+                        customer,
+                        bookingId,
+                        "Good news! Your laundry (Booking #" + bookingId
+                        + " - " + service + ") is done and ready."
+                );
+
+                JOptionPane.showMessageDialog(
+                        this,
+                        "Booking marked as done.\n"
+                        + "The customer has been notified."
+                );
+            }
+
+            loadBookings();
+            updateSummary();
+
+        } catch (SQLException e) {
+            showDatabaseError(e);
+        }
+    }
+
+    // ================= UPDATE PAYMENT =================
+    private void updatePayment(int bookingId, String newStatus) {
+        if (!guardActiveAccount()) {
+            return;
+        }
+
+        if (!canManagePayments()) {
+            JOptionPane.showMessageDialog(
+                    this,
+                    "You are not allowed to update payment status.",
+                    "Access Denied",
+                    JOptionPane.WARNING_MESSAGE
+            );
+            return;
+        }
+
+        String sql = "UPDATE tbl_bookings SET payment_status = ? "
+                + "WHERE booking_id = ? "
+                + "AND LOWER(booking_status) <> 'cancelled'";
+
+        try (Connection con = requireConnection();
+             PreparedStatement pst = con.prepareStatement(sql)) {
+
+            pst.setString(1, newStatus);
+            pst.setInt(2, bookingId);
+
+            int updated = pst.executeUpdate();
+
+            if (updated > 0) {
+                JOptionPane.showMessageDialog(
+                        this,
+                        "Payment status updated successfully."
+                );
+                loadBookings();
+                updateSummary();
+            } else {
+                JOptionPane.showMessageDialog(
+                        this,
+                        "Booking record was not found."
+                );
+            }
+
+        } catch (SQLException e) {
+            showDatabaseError(e);
+        }
+    }
+
+    // ================= SUMMARY COUNTS =================
+    private void updateSummary() {
+        String sql = "SELECT "
+                + "COUNT(*) AS total_bookings, "
+                + "COALESCE(SUM(CASE "
+                + "WHEN LOWER(booking_status) = 'pending' "
+                + "THEN 1 ELSE 0 END), 0) AS pending_bookings, "
+                + "COALESCE(SUM(CASE "
+                + "WHEN LOWER(payment_status) = 'paid' "
+                + "THEN 1 ELSE 0 END), 0) AS paid_bookings, "
+                + "COALESCE(SUM(CASE "
+                + "WHEN LOWER(payment_status) = 'not paid' "
+                + "THEN 1 ELSE 0 END), 0) AS unpaid_bookings "
+                + "FROM tbl_bookings";
+
+        try (Connection con = requireConnection();
+             PreparedStatement pst = con.prepareStatement(sql);
+             ResultSet rs = pst.executeQuery()) {
+
+            if (rs.next()) {
+                totalBookingsLabel.setText(
+                        String.valueOf(rs.getInt("total_bookings"))
+                );
+                pendingBookingsLabel.setText(
+                        String.valueOf(rs.getInt("pending_bookings"))
+                );
+                paidBookingsLabel.setText(
+                        String.valueOf(rs.getInt("paid_bookings"))
+                );
+                unpaidBookingsLabel.setText(
+                        String.valueOf(rs.getInt("unpaid_bookings"))
+                );
+            }
+
+        } catch (SQLException e) {
+            showDatabaseError(e);
+        }
+    }
+
+    // =====================================================
+    // SHOP REPORTS PAGE
+    // Filter panel + metrics summary + status chart +
+    // transaction table (same layout as the HTML mock-up,
+    // in the Lavandera purple theme).
+    // =====================================================
+
+    /** One booking row used by the reports page. */
+    private static class ReportRow {
+        final int id;
+        final String customer;
+        final String service;
+        final String date;
+        final String time;
+        final String status;
+        final String payment;
+        final String quantity;
+        final double weight;
+        final double amount;
+
+        ReportRow(int id, String customer, String service, String date,
+                  String time, String status, String payment,
+                  String quantity, double weight, double amount) {
+            this.id = id;
+            this.customer = customer;
+            this.service = service;
+            this.date = date;
+            this.time = time;
+            this.status = status;
+            this.payment = payment;
+            this.quantity = quantity;
+            this.weight = weight;
+            this.amount = amount;
+        }
+
+        boolean cancelled() {
+            return STATUS_CANCELLED.equalsIgnoreCase(status);
+        }
+
+        boolean done() {
+            return STATUS_DONE.equalsIgnoreCase(status);
+        }
+
+        /** Money actually received: paid and not cancelled. */
+        boolean sale() {
+            return !cancelled() && PAYMENT_PAID.equalsIgnoreCase(payment);
+        }
+
+        boolean unpaid() {
+            return !cancelled()
+                    && PAYMENT_NOT_PAID.equalsIgnoreCase(payment);
+        }
+
+        String statusLabel() {
+            if (cancelled()) return "Cancelled";
+            if (done()) return "Completed";
+            return status.isEmpty() ? "Pending" : status;
+        }
+    }
+
+    private void createReportsPanel() {
+        reportsPanel = new JPanel(null);
+        reportsPanel.setBackground(BACKGROUND);
+        reportsPanel.setBounds(240, 15, 940, 690);
+        reportsPanel.setVisible(false);
+        add(reportsPanel);
+
+        // ---------- header bar ----------
+        JPanel header = new CardPanel();
+        header.setLayout(null);
+        header.setBounds(10, 0, 915, 64);
+        reportsPanel.add(header);
+
+        IconBox headerIcon = new IconBox("\u2197", VERY_LIGHT_PURPLE,
+                PURPLE, LIGHT_PURPLE, 22);
+        headerIcon.setBounds(16, 12, 40, 40);
+        header.add(headerIcon);
+
+        placeLabel(header, "SHOP REPORTS",
+                new Font("Arial", Font.BOLD, 20), TEXT, 68, 9, 300, 27);
+        placeLabel(header,
+                "Overview of bookings, sales, and order metrics",
+                new Font("Arial", Font.PLAIN, 12), GRAY, 68, 36, 420, 18);
+
+        PillLabel live = new PillLabel("\u25CF Live Sync", GREEN_SOFT,
+                GREEN, GREEN_BORDER);
+        live.setBounds(640, 19, 100, 26);
+        header.add(live);
+
+        RoundButton resetButton = new RoundButton("Reset Filters",
+                VERY_LIGHT_PURPLE, LIGHT_PURPLE, PURPLE, null);
+        resetButton.setBounds(752, 16, 148, 32);
+        resetButton.addActionListener(e -> resetReportFilters());
+        header.add(resetButton);
+
+        // ---------- left: report configuration ----------
+        JPanel config = new CardPanel();
+        config.setLayout(null);
+        config.setBounds(10, 76, 320, 344);
+        reportsPanel.add(config);
+
+        placeLabel(config, "Report Configuration",
+                new Font("Arial", Font.BOLD, 15), TEXT, 20, 12, 190, 24);
+
+        PillLabel filterTag = new PillLabel("FILTER PANEL",
+                VERY_LIGHT_PURPLE, PURPLE, LIGHT_PURPLE);
+        filterTag.setBounds(214, 15, 86, 20);
+        config.add(filterTag);
+
+        addSeparator(config, 20, 44, 280);
+
+        placeLabel(config, "DATE FROM:",
+                new Font("Arial", Font.BOLD, 11), GRAY, 20, 54, 200, 16);
+        reportFromField = createReportField();
+        reportFromField.setBounds(20, 72, 206, 30);
+        reportFromField.setToolTipText("Type yyyy-MM-dd or use the calendar  (empty = no limit)");
+        config.add(reportFromField);
+        addCalendarButton(config, reportFromField, 72);
+
+        placeLabel(config, "DATE TO:",
+                new Font("Arial", Font.BOLD, 11), GRAY, 20, 110, 200, 16);
+        reportToField = createReportField();
+        reportToField.setBounds(20, 128, 206, 30);
+        reportToField.setToolTipText("Type yyyy-MM-dd or use the calendar  (empty = no limit)");
+        config.add(reportToField);
+        addCalendarButton(config, reportToField, 128);
+
+        placeLabel(config, "REPORT TYPE:",
+                new Font("Arial", Font.BOLD, 11), GRAY, 20, 166, 200, 16);
+        reportTypeBox = new JComboBox<>(new String[]{
+            "Sales / Bookings (All)",
+            "Sales Only (Paid)",
+            "Completed Orders",
+            "Cancelled Bookings",
+            "Unpaid Orders"
+        });
+        reportTypeBox.setFont(new Font("Arial", Font.PLAIN, 13));
+        reportTypeBox.setBackground(FIELD_BG);
+        reportTypeBox.setBounds(20, 184, 280, 30);
+        reportTypeBox.addActionListener(e -> renderReport());
+        config.add(reportTypeBox);
+
+        // quick shortcuts
+        String[] chips = {"Today", "This Week", "This Month", "All Time"};
+        int[] chipX = {20, 92, 164, 236};
+        int[] chipW = {64, 64, 64, 64};
+
+        for (int i = 0; i < chips.length; i++) {
+            String preset = chips[i];
+            RoundButton chip = new RoundButton(preset, VERY_LIGHT_PURPLE,
+                    LIGHT_PURPLE, TEXT, null);
+            chip.setFont(new Font("Arial", Font.BOLD, 10));
+            chip.setBounds(chipX[i], 226, chipW[i], 26);
+            chip.addActionListener(e -> applyQuickDate(preset));
+            config.add(chip);
+        }
+
+        addSeparator(config, 20, 260, 280);
+
+        JLabel tip = placeLabel(config,
+                "<html>The report updates automatically when you change "
+                + "the dates, report type or search.</html>",
+                FONT_HINT_REPORT, GRAY, 20, 274, 280, 34);
+
+        // ---------- right top: metrics summary ----------
+        JPanel metrics = new CardPanel();
+        metrics.setLayout(null);
+        metrics.setBounds(340, 76, 585, 226);
+        reportsPanel.add(metrics);
+
+        placeLabel(metrics, "Report Metrics Summary",
+                new Font("Arial", Font.BOLD, 16), TEXT, 20, 9, 350, 24);
+
+        reportPeriodLabel = placeLabel(metrics,
+                "Period: All Available Historical Data",
+                new Font("Arial", Font.PLAIN, 11), GRAY, 20, 33, 420, 18);
+
+        PillLabel liveSummary = new PillLabel("Live Summary",
+                VERY_LIGHT_PURPLE, PURPLE, LIGHT_PURPLE);
+        liveSummary.setBounds(466, 14, 99, 22);
+        metrics.add(liveSummary);
+
+        addSeparator(metrics, 20, 58, 545);
+
+        metricSales = addMetricRow(metrics, 0, "\u20B1", GREEN_SOFT,
+                GREEN, GREEN_BORDER, "Total Sales:", 18);
+        metricBookings = addMetricRow(metrics, 1, "\u25A6",
+                VERY_LIGHT_PURPLE, PURPLE, LIGHT_PURPLE,
+                "Total Bookings:", 16);
+        metricCompleted = addMetricRow(metrics, 2, "\u2713",
+                new Color(238, 233, 250), new Color(90, 70, 175),
+                new Color(214, 205, 240), "Completed Orders:", 16);
+        metricCancelled = addMetricRow(metrics, 3, "\u2715", RED_SOFT,
+                RED, RED_BORDER, "Cancelled Bookings:", 16);
+        metricUnpaid = addMetricRow(metrics, 4, "\u25F7", AMBER_SOFT,
+                AMBER, AMBER_BORDER, "Unpaid Orders:", 16);
+
+        // ---------- right bottom: visual distribution ----------
+        JPanel chartCard = new CardPanel();
+        chartCard.setLayout(null);
+        chartCard.setBounds(340, 312, 585, 108);
+        reportsPanel.add(chartCard);
+
+        placeLabel(chartCard, "VISUAL DISTRIBUTION",
+                new Font("Arial", Font.BOLD, 12), TEXT, 20, 8, 250, 20);
+
+        JLabel ratio = placeLabel(chartCard, "Status Ratio",
+                new Font("Arial", Font.PLAIN, 11), GRAY, 465, 9, 100, 18);
+        ratio.setHorizontalAlignment(SwingConstants.RIGHT);
+
+        donutChart = new DonutChart();
+        donutChart.setBounds(10, 28, 565, 76);
+        chartCard.add(donutChart);
+
+        // ---------- bottom: transaction records ----------
+        JPanel tableCard = new CardPanel();
+        tableCard.setLayout(null);
+        tableCard.setBounds(10, 432, 915, 258);
+        reportsPanel.add(tableCard);
+
+        placeLabel(tableCard, "Transaction Records",
+                new Font("Arial", Font.BOLD, 16), TEXT, 20, 9, 300, 24);
+        placeLabel(tableCard,
+                "List of transactions matching current filter criteria",
+                new Font("Arial", Font.PLAIN, 11), GRAY, 20, 33, 420, 18);
+
+        reportSearchField = new HintField("Search orders...");
+        styleReportField(reportSearchField);
+        reportSearchField.setBounds(705, 14, 190, 30);
+        reportSearchField.getDocument().addDocumentListener(
+                new DocumentListener() {
+                    @Override
+                    public void insertUpdate(DocumentEvent e) {
+                        renderReport();
+                    }
+
+                    @Override
+                    public void removeUpdate(DocumentEvent e) {
+                        renderReport();
+                    }
+
+                    @Override
+                    public void changedUpdate(DocumentEvent e) {
+                        renderReport();
+                    }
+                });
+        tableCard.add(reportSearchField);
+
+        reportModel = new DefaultTableModel(
+                new String[]{"Booking ID", "Date", "Customer", "Service",
+                    "Status", "Payment", "Amount"}, 0) {
+            @Override
+            public boolean isCellEditable(int row, int column) {
+                return false;
+            }
+
+            @Override
+            public Class<?> getColumnClass(int column) {
+                if (column == 0) return Integer.class;
+                if (column == 6) return Double.class;
+                return String.class;
+            }
+        };
+
+        reportTable = new JTable(reportModel);
+        reportTable.setRowHeight(30);
+        reportTable.setShowGrid(false);
+        reportTable.setShowHorizontalLines(true);
+        reportTable.setGridColor(CARD_BORDER);
+        reportTable.setIntercellSpacing(new Dimension(0, 1));
+        reportTable.setSelectionBackground(ROW_SELECTED);
+        reportTable.setSelectionForeground(TEXT);
+        reportTable.setFillsViewportHeight(true);
+        reportTable.setAutoCreateRowSorter(true);
+        reportTable.setAutoResizeMode(JTable.AUTO_RESIZE_ALL_COLUMNS);
+
+        int[] widths = {80, 95, 170, 180, 95, 95, 110};
+        for (int i = 0; i < widths.length; i++) {
+            reportTable.getColumnModel().getColumn(i)
+                    .setPreferredWidth(widths[i]);
+        }
+
+        JTableHeader tableHeader = reportTable.getTableHeader();
+        tableHeader.setReorderingAllowed(false);
+        tableHeader.setPreferredSize(new Dimension(0, 30));
+        tableHeader.setDefaultRenderer(new DefaultTableCellRenderer() {
+            @Override
+            public Component getTableCellRendererComponent(
+                    JTable t, Object v, boolean sel, boolean foc,
+                    int r, int c) {
+                super.getTableCellRendererComponent(t, v, false, false, r, c);
+                setText(String.valueOf(v).toUpperCase(Locale.ROOT));
+                setFont(new Font("Arial", Font.BOLD, 11));
+                setForeground(TEXT);
+                setBackground(VERY_LIGHT_PURPLE);
+                setOpaque(true);
+                setHorizontalAlignment(c == 6
+                        ? SwingConstants.RIGHT : SwingConstants.LEFT);
+                setBorder(BorderFactory.createCompoundBorder(
+                        BorderFactory.createMatteBorder(
+                                0, 0, 1, 0, LIGHT_PURPLE),
+                        new EmptyBorder(0, 12, 0, 12)));
+                return this;
+            }
+        });
+
+        reportTable.getColumnModel().getColumn(0).setCellRenderer(
+                cellRenderer(true, SwingConstants.LEFT, false));
+        reportTable.getColumnModel().getColumn(1).setCellRenderer(
+                cellRenderer(false, SwingConstants.LEFT, false));
+        reportTable.getColumnModel().getColumn(2).setCellRenderer(
+                cellRenderer(true, SwingConstants.LEFT, false));
+        reportTable.getColumnModel().getColumn(3).setCellRenderer(
+                cellRenderer(false, SwingConstants.LEFT, false));
+        reportTable.getColumnModel().getColumn(4).setCellRenderer(
+                new BadgeRenderer());
+        reportTable.getColumnModel().getColumn(5).setCellRenderer(
+                new BadgeRenderer());
+        reportTable.getColumnModel().getColumn(6).setCellRenderer(
+                cellRenderer(true, SwingConstants.RIGHT, true));
+
+        JScrollPane tableScroll = new JScrollPane(reportTable);
+        tableScroll.setBorder(BorderFactory.createLineBorder(CARD_BORDER));
+        tableScroll.getViewport().setBackground(Color.WHITE);
+        tableScroll.getVerticalScrollBar().setUnitIncrement(16);
+        tableScroll.setBounds(20, 58, 875, 188);
+        tableCard.add(tableScroll);
+
+        setDefaultReportDates();
+    }
+
+    // ---------- small builders for the reports page ----------
+
+    private JLabel placeLabel(JPanel parent, String text, Font font,
+                              Color color, int x, int y, int w, int h) {
+        JLabel label = new JLabel(text);
+        label.setFont(font);
+        label.setForeground(color);
+        label.setBounds(x, y, w, h);
+        parent.add(label);
+        return label;
+    }
+
+    private void addSeparator(JPanel parent, int x, int y, int w) {
+        JSeparator line = new JSeparator();
+        line.setForeground(CARD_BORDER);
+        line.setBounds(x, y, w, 1);
+        parent.add(line);
+    }
+
+    /** Adds a "Calendar" button to the right of a date field. */
+    private void addCalendarButton(JPanel card, JTextField field, int y) {
+        RoundButton button = new RoundButton("Calendar", PURPLE,
+                new Color(125, 75, 165), Color.WHITE, null);
+        button.setFont(new Font("Arial", Font.BOLD, 11));
+        button.setBounds(234, y, 66, 30);
+        button.addActionListener(e -> openReportCalendar(field));
+        card.add(button);
+    }
+
+    /** Opens the calendar and writes the chosen date into the field. */
+    private void openReportCalendar(JTextField field) {
+        LocalDate current = null;
+
+        try {
+            String text = field.getText().trim();
+            if (!text.isEmpty()) {
+                current = LocalDate.parse(text);
+            }
+        } catch (DateTimeParseException ignored) {
+            // not a valid date yet - the calendar opens on today
+        }
+
+        new ReportCalendarDialog(this, current, date ->
+                field.setText(date == null ? "" : date.toString())
+        ).setVisible(true);
+    }
+
+    private JTextField createReportField() {
+        JTextField field = new JTextField();
+        styleReportField(field);
+
+        // Date fields: numbers and "-" only (no letters), max 10 characters.
+        ((AbstractDocument) field.getDocument())
+                .setDocumentFilter(new DateInputFilter());
+
+        // The report updates by itself when a date is typed or picked.
+        field.getDocument().addDocumentListener(new DocumentListener() {
+            @Override
+            public void insertUpdate(DocumentEvent e) {
+                autoRefreshReport();
+            }
+
+            @Override
+            public void removeUpdate(DocumentEvent e) {
+                autoRefreshReport();
+            }
+
+            @Override
+            public void changedUpdate(DocumentEvent e) {
+                autoRefreshReport();
+            }
+        });
+
+        return field;
+    }
+
+    /** Allows only digits and "-" while typing a yyyy-MM-dd date. */
+    private static class DateInputFilter extends DocumentFilter {
+
+        private static final int MAX_LENGTH = 10;
+
+        @Override
+        public void insertString(
+                FilterBypass fb, int offset, String text, AttributeSet attrs
+        ) throws BadLocationException {
+            replace(fb, offset, 0, text, attrs);
+        }
+
+        @Override
+        public void replace(
+                FilterBypass fb, int offset, int length,
+                String text, AttributeSet attrs
+        ) throws BadLocationException {
+
+            String current = fb.getDocument().getText(
+                    0, fb.getDocument().getLength());
+
+            String replacement = text == null ? "" : text;
+
+            String next = current.substring(0, offset)
+                    + replacement
+                    + current.substring(offset + length);
+
+            if (next.length() <= MAX_LENGTH && next.matches("[0-9-]*")) {
+                super.replace(fb, offset, length, replacement, attrs);
+            }
+        }
+    }
+
+    private void styleReportField(JTextField field) {
+        field.setFont(new Font("Arial", Font.PLAIN, 13));
+        field.setForeground(TEXT);
+        field.setBackground(FIELD_BG);
+        field.setBorder(BorderFactory.createCompoundBorder(
+                BorderFactory.createLineBorder(LIGHT_PURPLE),
+                new EmptyBorder(4, 10, 4, 10)));
+    }
+
+    /** One line of the metrics summary: icon, label and value. */
+    private JLabel addMetricRow(JPanel card, int index, String glyph,
+                                Color iconBg, Color iconFg,
+                                Color iconBorder, String label,
+                                int valueSize) {
+        int y = 62 + index * 32;
+
+        IconBox icon = new IconBox(glyph, iconBg, iconFg, iconBorder, 14);
+        icon.setBounds(20, y + 3, 26, 26);
+        card.add(icon);
+
+        placeLabel(card, label, new Font("Arial", Font.BOLD, 13), TEXT,
+                58, y + 5, 260, 22);
+
+        JLabel value = new JLabel("0", SwingConstants.RIGHT);
+        value.setFont(new Font("Arial", Font.BOLD, valueSize));
+        value.setForeground(TEXT);
+        value.setBounds(340, y + 3, 225, 26);
+        card.add(value);
+
+        if (index < 4) {
+            addSeparator(card, 20, y + 31, 545);
+        }
+
+        return value;
+    }
+
+    private DefaultTableCellRenderer cellRenderer(
+            boolean bold, int align, boolean amount) {
+
+        return new DefaultTableCellRenderer() {
+            @Override
+            public Component getTableCellRendererComponent(
+                    JTable t, Object v, boolean sel, boolean foc,
+                    int r, int c) {
+                super.getTableCellRendererComponent(t, v, sel, false, r, c);
+
+                if (amount && v instanceof Number) {
+                    setText("\u20B1" + String.format(
+                            "%,.2f", ((Number) v).doubleValue()));
+                }
+
+                setFont(new Font("Arial",
+                        bold ? Font.BOLD : Font.PLAIN, 12));
+                setForeground(TEXT);
+                setBackground(sel ? ROW_SELECTED : Color.WHITE);
+                setHorizontalAlignment(align);
+                setBorder(new EmptyBorder(0, 12, 0, 12));
+                return this;
+            }
+        };
+    }
+
+    // ---------- report logic ----------
+
+    /** True while the code (not the user) is changing the date fields. */
+    private boolean suppressDateEvents;
+
+    /**
+     * Default range = the WHOLE current month (1st to last day).
+     *
+     * <p>A booking date is the scheduled laundry date, which is often
+     * in the future, so the range must not stop at today or upcoming
+     * bookings would be hidden from the report.</p>
+     */
+    private void setDefaultReportDates() {
+        boolean before = suppressDateEvents;
+        suppressDateEvents = true;
+
+        try {
+            LocalDate today = LocalDate.now();
+            reportFromField.setText(today.withDayOfMonth(1).toString());
+            reportToField.setText(today.with(
+                    TemporalAdjusters.lastDayOfMonth()).toString());
+        } finally {
+            suppressDateEvents = before;
+        }
+    }
+
+    /** An empty field (no limit) or a complete yyyy-MM-dd date is ready. */
+    private static boolean isDateReady(String text) {
+        if (text.isEmpty()) {
+            return true;
+        }
+
+        try {
+            LocalDate.parse(text);
+            return true;
+        } catch (DateTimeParseException e) {
+            return false;
+        }
+    }
+
+    /**
+     * Refreshes the report after the user typed or picked a date.
+     * Stays silent (no pop-ups) while the date is still half typed.
+     */
+    private void autoRefreshReport() {
+        if (suppressDateEvents
+                || reportsPanel == null
+                || !reportsPanel.isVisible()
+                || reportFromField == null
+                || reportToField == null) {
+            return;
+        }
+
+        String from = reportFromField.getText().trim();
+        String to = reportToField.getText().trim();
+
+        if (!isDateReady(from) || !isDateReady(to)) {
+            return;
+        }
+
+        if (!from.isEmpty() && !to.isEmpty()
+                && LocalDate.parse(from).isAfter(LocalDate.parse(to))) {
+            return;
+        }
+
+        generateReport();
+    }
+
+    private void resetReportFilters() {
+        setDefaultReportDates();
+        reportTypeBox.setSelectedIndex(0);
+        reportSearchField.setText("");
+        generateReport();
+    }
+
+    private void applyQuickDate(String preset) {
+        LocalDate today = LocalDate.now();
+
+        suppressDateEvents = true;
+
+        try {
+            switch (preset) {
+                case "Today":
+                    reportFromField.setText(today.toString());
+                    reportToField.setText(today.toString());
+                    break;
+                case "This Week":
+                    // Sunday to Saturday, so bookings later this week
+                    // (scheduled dates) are included too.
+                    reportFromField.setText(today.with(
+                            TemporalAdjusters.previousOrSame(DayOfWeek.SUNDAY))
+                            .toString());
+                    reportToField.setText(today.with(
+                            TemporalAdjusters.nextOrSame(DayOfWeek.SATURDAY))
+                            .toString());
+                    break;
+                case "This Month":
+                    setDefaultReportDates();
+                    break;
+                default:
+                    reportFromField.setText("");
+                    reportToField.setText("");
+                    break;
+            }
+        } finally {
+            suppressDateEvents = false;
+        }
+
+        generateReport();
+    }
+
+    /** Loads the rows for the chosen dates, then refreshes the page. */
+    private void generateReport() {
+        if (!guardActiveAccount()) {
+            return;
+        }
+
+        String from = reportFromField.getText().trim();
+        String to = reportToField.getText().trim();
+
+        try {
+            LocalDate fromDate = from.isEmpty() ? null : LocalDate.parse(from);
+            LocalDate toDate = to.isEmpty() ? null : LocalDate.parse(to);
+
+            if (fromDate != null && toDate != null
+                    && fromDate.isAfter(toDate)) {
+                JOptionPane.showMessageDialog(
+                        this,
+                        "\"Date From\" cannot be after \"Date To\".",
+                        "Invalid Dates",
+                        JOptionPane.WARNING_MESSAGE
+                );
+                return;
+            }
+        } catch (DateTimeParseException e) {
+            JOptionPane.showMessageDialog(
+                    this,
+                    "Please type dates as yyyy-MM-dd.\n"
+                    + "Example: 2026-10-15\n"
+                    + "Leave a date empty for no limit.",
+                    "Invalid Date",
+                    JOptionPane.WARNING_MESSAGE
+            );
+            return;
+        }
+
+        StringBuilder sql = new StringBuilder(
+                "SELECT booking_id, username, service, booking_date, "
+                + "booking_time, booking_status, payment_status, "
+                + "quantity, weight, amount FROM tbl_bookings WHERE 1=1");
+
+        if (!from.isEmpty()) {
+            sql.append(" AND booking_date >= ?");
+        }
+        if (!to.isEmpty()) {
+            sql.append(" AND booking_date <= ?");
+        }
+        sql.append(" ORDER BY booking_date DESC, booking_id DESC");
+
+        reportRows.clear();
+
+        try (Connection con = requireConnection();
+             PreparedStatement pst = con.prepareStatement(sql.toString())) {
+
+            int index = 1;
+            if (!from.isEmpty()) {
+                pst.setString(index++, from);
+            }
+            if (!to.isEmpty()) {
+                pst.setString(index++, to);
+            }
+
+            try (ResultSet rs = pst.executeQuery()) {
+                while (rs.next()) {
+                    reportRows.add(new ReportRow(
+                            rs.getInt("booking_id"),
+                            safe(displayName(rs.getString("username"))),
+                            safe(rs.getString("service")),
+                            safe(rs.getString("booking_date")),
+                            safe(rs.getString("booking_time")),
+                            safe(rs.getString("booking_status")),
+                            safe(rs.getString("payment_status")),
+                            safe(rs.getString("quantity")),
+                            rs.getDouble("weight"),
+                            rs.getDouble("amount")
+                    ));
+                }
+            }
+
+        } catch (SQLException e) {
+            showDatabaseError(e);
+            return;
+        }
+
+        if (from.isEmpty() && to.isEmpty()) {
+            reportPeriodText = "All Available Historical Data";
+        } else {
+            reportPeriodText = (from.isEmpty() ? "Start" : from)
+                    + " to " + (to.isEmpty() ? "Latest" : to);
+        }
+
+        renderReport();
+    }
+
+    private boolean matchesReportType(ReportRow r, int typeIndex) {
+        switch (typeIndex) {
+            case 1:  return r.sale();
+            case 2:  return r.done();
+            case 3:  return r.cancelled();
+            case 4:  return r.unpaid();
+            default: return true;
+        }
+    }
+
+    /** Applies the type + search filters and refreshes all widgets. */
+    private void renderReport() {
+        if (reportModel == null) {
+            return;
+        }
+
+        int typeIndex = Math.max(0, reportTypeBox.getSelectedIndex());
+        String query = reportSearchField.getText().trim()
+                .toLowerCase(Locale.ROOT);
+
+        shownRows.clear();
+
+        for (ReportRow r : reportRows) {
+            if (!matchesReportType(r, typeIndex)) {
+                continue;
+            }
+
+            if (!query.isEmpty()
+                    && !r.customer.toLowerCase(Locale.ROOT).contains(query)
+                    && !r.service.toLowerCase(Locale.ROOT).contains(query)
+                    && !String.valueOf(r.id).contains(query)) {
+                continue;
+            }
+
+            shownRows.add(r);
+        }
+
+        int completed = 0;
+        int cancelled = 0;
+        int unpaid = 0;
+        double sales = 0;
+
+        reportModel.setRowCount(0);
+
+        for (ReportRow r : shownRows) {
+            if (r.done()) completed++;
+            if (r.cancelled()) cancelled++;
+            if (r.unpaid()) unpaid++;
+            if (r.sale()) sales += r.amount;
+
+            reportModel.addRow(new Object[]{
+                r.id, r.date, r.customer, r.service,
+                r.statusLabel(), r.payment, r.amount
+            });
+        }
+
+        metricSales.setText("\u20B1" + String.format("%,.2f", sales));
+        metricBookings.setText(String.valueOf(shownRows.size()));
+        metricCompleted.setText(String.valueOf(completed));
+        metricCancelled.setText(String.valueOf(cancelled));
+        metricUnpaid.setText(String.valueOf(unpaid));
+        reportPeriodLabel.setText("Period: " + reportPeriodText);
+
+        donutChart.setData(completed, cancelled, unpaid);
+    }
+
+    // ---------- customer receipt ----------
+
+    /** Receipt window: preview + Print / Save PDF, Save Image, Close. */
+    private void showReceipt(ReportRow booking) {
+
+        JDialog dialog = new JDialog(
+                this, "Receipt - Booking #" + booking.id, true);
+
+        JPanel receipt = buildReceiptPanel(booking);
+
+        // Receipt preview (scrolls if the screen is small).
+        JScrollPane scroll = new JScrollPane(receipt);
+        scroll.setBorder(null);
+        scroll.getViewport().setBackground(BACKGROUND);
+        scroll.getVerticalScrollBar().setUnitIncrement(16);
+
+        Dimension size = receipt.getPreferredSize();
+        int maxHeight = Toolkit.getDefaultToolkit().getScreenSize().height - 220;
+
+        scroll.setPreferredSize(new Dimension(
+                size.width + 22,
+                Math.min(size.height + 4, Math.max(300, maxHeight))));
+
+        RoundButton print = new RoundButton("PRINT / SAVE PDF", PURPLE,
+                new Color(125, 75, 165), Color.WHITE, null);
+        print.setPreferredSize(new Dimension(150, 34));
+        print.addActionListener(e -> printReceipt(receipt));
+
+        RoundButton image = new RoundButton("SAVE IMAGE",
+                VERY_LIGHT_PURPLE, LIGHT_PURPLE, TEXT, CARD_BORDER);
+        image.setPreferredSize(new Dimension(110, 34));
+        image.addActionListener(e -> saveReceiptImage(receipt, booking));
+
+        RoundButton close = new RoundButton("CLOSE",
+                VERY_LIGHT_PURPLE, LIGHT_PURPLE, TEXT, CARD_BORDER);
+        close.setPreferredSize(new Dimension(80, 34));
+        close.addActionListener(e -> dialog.dispose());
+
+        JPanel buttons = new JPanel(new FlowLayout(FlowLayout.CENTER, 10, 0));
+        buttons.setOpaque(false);
+        buttons.add(print);
+        buttons.add(image);
+        buttons.add(close);
+
+        JPanel root = new JPanel(new BorderLayout(0, 12));
+        root.setBackground(BACKGROUND);
+        root.setBorder(new EmptyBorder(16, 16, 16, 16));
+        root.add(scroll, BorderLayout.CENTER);
+        root.add(buttons, BorderLayout.SOUTH);
+
+        dialog.setContentPane(root);
+        dialog.getRootPane().registerKeyboardAction(
+                e -> dialog.dispose(),
+                KeyStroke.getKeyStroke("ESCAPE"),
+                JComponent.WHEN_IN_FOCUSED_WINDOW);
+
+        dialog.pack();
+        dialog.setResizable(false);
+        dialog.setLocationRelativeTo(this);
+        dialog.setVisible(true);
+    }
+
+    /** The receipt itself (this is the part that is printed / saved). */
+    private JPanel buildReceiptPanel(ReportRow b) {
+
+        JPanel p = new JPanel();
+        p.setLayout(new BoxLayout(p, BoxLayout.Y_AXIS));
+        p.setBackground(Color.WHITE);
+        p.setBorder(BorderFactory.createCompoundBorder(
+                BorderFactory.createLineBorder(LIGHT_PURPLE),
+                new EmptyBorder(24, 28, 24, 28)));
+
+        // fixes the receipt width
+        p.add(Box.createRigidArea(new Dimension(324, 0)));
+
+        p.add(centeredLabel("Lavandera",
+                new Font("Georgia", Font.BOLD, 27), PURPLE));
+        p.add(centeredLabel("Laundry Shop",
+                new Font("Arial", Font.PLAIN, 12), GRAY));
+        p.add(Box.createVerticalStrut(10));
+        p.add(centeredLabel("OFFICIAL RECEIPT",
+                new Font("Arial", Font.BOLD, 13), TEXT));
+        p.add(new ReceiptLine());
+
+        String issued = LocalDate.now() + "  "
+                + java.time.LocalTime.now().format(
+                        DateTimeFormatter.ofPattern("h:mm a", Locale.ENGLISH));
+
+        p.add(receiptRow("Receipt No.", String.format("LAV-%06d", b.id)));
+        p.add(receiptRow("Date Issued", issued));
+        p.add(new ReceiptLine());
+
+        p.add(receiptRow("Customer", b.customer));
+        p.add(receiptRow("Service", b.service));
+        p.add(receiptRow("Quantity",
+                b.quantity.isEmpty() ? "-" : b.quantity + " item(s)"));
+        p.add(receiptRow("Weight",
+                b.weight > 0
+                        ? String.format(Locale.ENGLISH, "%.2f kg", b.weight)
+                        : "-"));
+        p.add(receiptRow("Booking Date", b.date));
+        p.add(receiptRow("Booking Time", formatReceiptTime(b.time)));
+        p.add(receiptRow("Booking Status", b.statusLabel()));
+        p.add(new ReceiptLine());
+
+        // total
+        JPanel total = new JPanel(new BorderLayout());
+        total.setOpaque(false);
+        total.setMaximumSize(new Dimension(Integer.MAX_VALUE, 40));
+        total.setAlignmentX(Component.CENTER_ALIGNMENT);
+
+        JLabel totalLabel = new JLabel("TOTAL AMOUNT");
+        totalLabel.setFont(new Font("Arial", Font.BOLD, 14));
+        totalLabel.setForeground(TEXT);
+
+        JLabel totalValue = new JLabel(
+                "\u20B1" + String.format("%,.2f", b.amount));
+        totalValue.setFont(new Font("Arial", Font.BOLD, 22));
+        totalValue.setForeground(PURPLE);
+
+        total.add(totalLabel, BorderLayout.WEST);
+        total.add(totalValue, BorderLayout.EAST);
+        p.add(total);
+        p.add(Box.createVerticalStrut(10));
+
+        // payment status pill
+        boolean paid = PAYMENT_PAID.equalsIgnoreCase(b.payment);
+
+        PillLabel status = new PillLabel(
+                paid ? "PAID" : "UNPAID",
+                paid ? GREEN_SOFT : AMBER_SOFT,
+                paid ? GREEN : AMBER,
+                paid ? GREEN_BORDER : AMBER_BORDER);
+        status.setFont(new Font("Arial", Font.BOLD, 12));
+        status.setPreferredSize(new Dimension(110, 26));
+        status.setMaximumSize(new Dimension(110, 26));
+        status.setAlignmentX(Component.CENTER_ALIGNMENT);
+        p.add(status);
+
+        p.add(new ReceiptLine());
+
+        p.add(receiptRow("Served by", userName));
+        p.add(Box.createVerticalStrut(12));
+        p.add(centeredLabel("Thank you for choosing Lavandera!",
+                new Font("Arial", Font.BOLD, 12), TEXT));
+        p.add(Box.createVerticalStrut(3));
+        p.add(centeredLabel("Clean Clothes, Happy Life.",
+                new Font("Arial", Font.ITALIC, 11), GRAY));
+
+        return p;
+    }
+
+    private JLabel centeredLabel(String text, Font font, Color color) {
+        JLabel label = new JLabel(text, SwingConstants.CENTER);
+        label.setFont(font);
+        label.setForeground(color);
+        label.setAlignmentX(Component.CENTER_ALIGNMENT);
+        label.setMaximumSize(new Dimension(Integer.MAX_VALUE,
+                label.getPreferredSize().height + 2));
+        return label;
+    }
+
+    /** One "label ........ value" line of the receipt. */
+    private JPanel receiptRow(String label, String value) {
+        JPanel row = new JPanel(new BorderLayout(12, 0));
+        row.setOpaque(false);
+        row.setAlignmentX(Component.CENTER_ALIGNMENT);
+        row.setMaximumSize(new Dimension(Integer.MAX_VALUE, 26));
+        row.setBorder(new EmptyBorder(3, 0, 3, 0));
+
+        JLabel left = new JLabel(label);
+        left.setFont(new Font("Arial", Font.PLAIN, 12));
+        left.setForeground(GRAY);
+
+        JLabel right = new JLabel(value, SwingConstants.RIGHT);
+        right.setFont(new Font("Arial", Font.BOLD, 12));
+        right.setForeground(TEXT);
+
+        row.add(left, BorderLayout.WEST);
+        row.add(right, BorderLayout.CENTER);
+        return row;
+    }
+
+    private String formatReceiptTime(String time) {
+        try {
+            return java.time.LocalTime.parse(time).format(
+                    DateTimeFormatter.ofPattern("h:mm a", Locale.ENGLISH));
+        } catch (DateTimeParseException e) {
+            return time.isEmpty() ? "-" : time;
+        }
+    }
+
+    /**
+     * Prints the receipt. Choose "Microsoft Print to PDF" (or
+     * "Save as PDF") as the printer to get a PDF file.
+     */
+    private void printReceipt(JComponent receipt) {
+        PrinterJob job = PrinterJob.getPrinterJob();
+        job.setJobName("Lavandera Receipt");
+
+        PageFormat format = job.defaultPage();
+        format.setOrientation(PageFormat.PORTRAIT);
+
+        job.setPrintable((Graphics g, PageFormat page, int pageIndex) -> {
+            if (pageIndex > 0) {
+                return Printable.NO_SUCH_PAGE;
+            }
+
+            Graphics2D g2 = (Graphics2D) g;
+            g2.translate(page.getImageableX(), page.getImageableY());
+
+            double scale = Math.min(1.6, Math.min(
+                    page.getImageableWidth() / receipt.getWidth(),
+                    page.getImageableHeight() / receipt.getHeight()));
+
+            g2.scale(scale, scale);
+            receipt.printAll(g2);
+
+            return Printable.PAGE_EXISTS;
+        }, format);
+
+        if (job.printDialog()) {
+            try {
+                job.print();
+            } catch (PrinterException e) {
+                JOptionPane.showMessageDialog(
+                        this,
+                        "Could not print the receipt: " + e.getMessage(),
+                        "Print Error",
+                        JOptionPane.ERROR_MESSAGE
+                );
+            }
+        }
+    }
+
+    /** Saves the receipt as a sharp PNG picture. */
+    private void saveReceiptImage(JComponent receipt, ReportRow booking) {
+        JFileChooser chooser = new JFileChooser();
+        chooser.setDialogTitle("Save Receipt Image");
+        chooser.setSelectedFile(new File(
+                "Lavandera_Receipt_" + String.format("%06d", booking.id)
+                + ".png"));
+
+        if (chooser.showSaveDialog(this) != JFileChooser.APPROVE_OPTION) {
+            return;
+        }
+
+        File file = chooser.getSelectedFile();
+
+        if (!file.getName().toLowerCase(Locale.ROOT).endsWith(".png")) {
+            file = new File(file.getParentFile(), file.getName() + ".png");
+        }
+
+        int scale = 2; // 2x for a sharper picture
+
+        BufferedImage image = new BufferedImage(
+                receipt.getWidth() * scale,
+                receipt.getHeight() * scale,
+                BufferedImage.TYPE_INT_RGB);
+
+        Graphics2D g2 = image.createGraphics();
+        g2.setRenderingHint(RenderingHints.KEY_ANTIALIASING,
+                RenderingHints.VALUE_ANTIALIAS_ON);
+        g2.setRenderingHint(RenderingHints.KEY_TEXT_ANTIALIASING,
+                RenderingHints.VALUE_TEXT_ANTIALIAS_ON);
+        g2.setColor(Color.WHITE);
+        g2.fillRect(0, 0, image.getWidth(), image.getHeight());
+        g2.scale(scale, scale);
+        receipt.printAll(g2);
+        g2.dispose();
+
+        try {
+            ImageIO.write(image, "png", file);
+
+            JOptionPane.showMessageDialog(
+                    this,
+                    "Receipt saved to:\n" + file.getAbsolutePath(),
+                    "Receipt Saved",
+                    JOptionPane.INFORMATION_MESSAGE
+            );
+
+        } catch (IOException e) {
+            JOptionPane.showMessageDialog(
+                    this,
+                    "Could not save the receipt: " + e.getMessage(),
+                    "Save Error",
+                    JOptionPane.ERROR_MESSAGE
+            );
+        }
+    }
+
+    /** Dashed divider line used on the receipt. */
+    private static class ReceiptLine extends JComponent {
+
+        ReceiptLine() {
+            setPreferredSize(new Dimension(10, 16));
+            setMaximumSize(new Dimension(Integer.MAX_VALUE, 16));
+            setAlignmentX(Component.CENTER_ALIGNMENT);
+        }
+
+        @Override
+        protected void paintComponent(Graphics g) {
+            Graphics2D g2 = (Graphics2D) g.create();
+            g2.setColor(new Color(190, 170, 210));
+            g2.setStroke(new BasicStroke(1f, BasicStroke.CAP_BUTT,
+                    BasicStroke.JOIN_MITER, 10f, new float[]{4f, 4f}, 0f));
+            g2.drawLine(0, getHeight() / 2, getWidth(), getHeight() / 2);
+            g2.dispose();
+        }
+    }
+
+    // ================= PAGE SWITCHING =================
+    private void showDashboard() {
+        profilePanel.setVisible(false);
+        reportsPanel.setVisible(false);
+        dashboard.setVisible(true);
+        selectMenu(dashButton);
+
+        loadBookings();
+        updateSummary();
+    }
+
+    private void showReports() {
+        if (!guardActiveAccount()) return;
+
+        dashboard.setVisible(false);
+        profilePanel.setVisible(false);
+        reportsPanel.setVisible(true);
+        selectMenu(reportsButton);
+
+        generateReport();
+    }
+
+    // ================= PROFILE PAGE =================
+    private void createProfilePanel() {
+        profilePanel = new JPanel(null);
+        profilePanel.setBackground(BACKGROUND);
+        profilePanel.setBounds(240, 15, 940, 690);
+        profilePanel.setVisible(false);
+        add(profilePanel);
+
+        JLabel title = new JLabel("My Profile");
+        title.setFont(new Font("Arial", Font.BOLD, 28));
+        title.setForeground(TEXT);
+        title.setBounds(10, 5, 450, 40);
+        profilePanel.add(title);
+
+        JLabel subtitle = new JLabel("View your account information");
+        subtitle.setFont(new Font("Arial", Font.PLAIN, 14));
+        subtitle.setForeground(GRAY);
+        subtitle.setBounds(12, 45, 600, 25);
+        profilePanel.add(subtitle);
+
+        // ---------- header card: avatar, name, role ----------
+        JPanel headerCard = new RoundPanel(Color.WHITE, 16);
+        headerCard.setLayout(null);
+        headerCard.setBounds(10, 85, 915, 150);
+        profilePanel.add(headerCard);
+
+        profileAvatar = new JPanel(null) {
+            @Override
+            protected void paintComponent(Graphics g) {
+                Graphics2D g2 = (Graphics2D) g.create();
+                g2.setRenderingHint(RenderingHints.KEY_ANTIALIASING,
+                        RenderingHints.VALUE_ANTIALIAS_ON);
+                g2.setPaint(new GradientPaint(0, 0, new Color(150, 100, 190),
+                        getWidth(), getHeight(), new Color(105, 55, 145)));
+                g2.fill(new Ellipse2D.Double(0, 0, getWidth(), getHeight()));
+                g2.setColor(Color.WHITE);
+                g2.setFont(new Font("Serif", Font.BOLD, 38));
+                FontMetrics fm = g2.getFontMetrics();
+                g2.drawString(profileInitials,
+                        (getWidth() - fm.stringWidth(profileInitials)) / 2,
+                        (getHeight() - fm.getHeight()) / 2 + fm.getAscent());
+                g2.dispose();
+            }
+        };
+        profileAvatar.setOpaque(false);
+        profileAvatar.setBounds(30, 25, 100, 100);
+        headerCard.add(profileAvatar);
+
+        profileNameLabel = new JLabel(userName);
+        profileNameLabel.setFont(new Font("Arial", Font.BOLD, 22));
+        profileNameLabel.setForeground(PURPLE);
+        profileNameLabel.setBounds(155, 32, 480, 30);
+        headerCard.add(profileNameLabel);
+
+        profileRoleLabel = new JLabel(role);
+        profileRoleLabel.setFont(new Font("Arial", Font.PLAIN, 15));
+        profileRoleLabel.setForeground(TEXT);
+        profileRoleLabel.setBounds(155, 66, 480, 24);
+        headerCard.add(profileRoleLabel);
+
+        profileUserLabel = new JLabel("");
+        profileUserLabel.setFont(new Font("Arial", Font.PLAIN, 14));
+        profileUserLabel.setForeground(GRAY);
+        profileUserLabel.setBounds(155, 94, 480, 24);
+        headerCard.add(profileUserLabel);
+
+        PillLabel activeBadge = new PillLabel(
+                "\u2022 Active", Color.WHITE, GREEN, GREEN);
+        activeBadge.setBounds(790, 28, 100, 26);
+        headerCard.add(activeBadge);
+
+        JButton backButton = new JButton("Back to Dashboard");
+        backButton.setFont(new Font("Arial", Font.BOLD, 13));
+        backButton.setBackground(Color.WHITE);
+        backButton.setForeground(PURPLE);
+        backButton.setFocusPainted(false);
+        backButton.setBorder(BorderFactory.createLineBorder(PURPLE));
+        backButton.setCursor(new Cursor(Cursor.HAND_CURSOR));
+        backButton.setBounds(735, 90, 155, 38);
+        backButton.addActionListener(e -> showDashboard());
+        headerCard.add(backButton);
+
+        // ---------- personal information card ----------
+        JPanel infoCard = new RoundPanel(Color.WHITE, 16);
+        infoCard.setLayout(null);
+        infoCard.setBounds(10, 255, 915, 215);
+        profilePanel.add(infoCard);
+
+        addCardTitle(infoCard, "Personal Information");
+
+        profileFirstName = addProfileField(infoCard, "First Name", 35, 80);
+        profileLastName = addProfileField(infoCard, "Last Name", 335, 80);
+        profileUsernameValue = addProfileField(infoCard, "Username", 635, 80);
+        profileEmail = addProfileField(infoCard, "Email Address", 35, 140);
+        profileRoleValue = addProfileField(infoCard, "User Role", 335, 140);
+        profileSince = addProfileField(infoCard, "Member Since", 635, 140);
+
+        // ---------- account access card ----------
+        JPanel accessCard = new RoundPanel(Color.WHITE, 16);
+        accessCard.setLayout(null);
+        accessCard.setBounds(10, 490, 915, 160);
+        profilePanel.add(accessCard);
+
+        addCardTitle(accessCard, "Account Access");
+
+        JLabel status = addProfileField(accessCard, "Account Status", 35, 80);
+        status.setText("Active");
+        status.setForeground(GREEN);
+
+        JLabel staffAccess = addProfileField(accessCard, "Address", 335, 80);
+        staffAccess.setText(isAdmin() ? "Cagayan De Oro" : "Not allowed");
+
+        JLabel bookingAccess = addProfileField(accessCard, "Address", 635, 80);
+        bookingAccess.setText(canManagePayments() ? "Cagayan De Oro" : "Not allowed");
+    }
+
+    private void addCardTitle(JPanel card, String text) {
+        JLabel title = new JLabel(text);
+        title.setFont(new Font("Arial", Font.BOLD, 20));
+        title.setForeground(PURPLE);
+        title.setBounds(35, 18, 500, 30);
+        card.add(title);
+
+        JSeparator line = new JSeparator();
+        line.setForeground(LIGHT_PURPLE);
+        line.setBounds(35, 58, 845, 1);
+        card.add(line);
+    }
+
+    /** Adds a small gray label with a value under it; returns the value. */
+    private JLabel addProfileField(JPanel card, String label, int x, int y) {
+        JLabel caption = new JLabel(label);
+        caption.setFont(new Font("Arial", Font.PLAIN, 13));
+        caption.setForeground(GRAY);
+        caption.setBounds(x, y, 280, 22);
+        card.add(caption);
+
+        JLabel value = new JLabel("-");
+        value.setFont(new Font("Arial", Font.PLAIN, 16));
+        value.setForeground(TEXT);
+        value.setBounds(x, y + 24, 280, 26);
+        card.add(value);
+        return value;
+    }
+
+    private void showProfile() {
+        if (!guardActiveAccount()) return;
+
+        String fullName = userName;
+        String username = "";
+        String email = "N/A";
+        String roleText = role;
+        String memberSince = "N/A";
+
+        String sql = "SELECT full_name, username, email, role FROM users "
+                + "WHERE full_name=? AND LOWER(role)=LOWER(?) "
+                + "AND is_archived=0 LIMIT 1";
+
+        try (Connection c = requireConnection();
+             PreparedStatement q = c.prepareStatement(sql)) {
+            q.setString(1, userName);
+            q.setString(2, role);
+            try (ResultSet r = q.executeQuery()) {
+                if (r.next()) {
+                    fullName = safe(r.getString("full_name"));
+                    username = safe(r.getString("username"));
+                    email = safe(r.getString("email"));
+                    roleText = safe(r.getString("role"));
+                }
+            }
+        } catch (SQLException e) {
+            showDatabaseError(e);
+            return;
+        }
+
+        // "Member Since" only works if the users table has a created_at
+        // column. If it doesn't, this is skipped and "N/A" is shown.
+        try (Connection c = requireConnection();
+             PreparedStatement q = c.prepareStatement(
+                     "SELECT created_at FROM users WHERE full_name=? "
+                     + "AND LOWER(role)=LOWER(?) LIMIT 1")) {
+            q.setString(1, userName);
+            q.setString(2, role);
+            try (ResultSet r = q.executeQuery()) {
+                if (r.next() && r.getTimestamp(1) != null) {
+                    memberSince = r.getTimestamp(1).toLocalDateTime().format(
+                            DateTimeFormatter.ofPattern("MMM yyyy", Locale.ENGLISH));
+                }
+            }
+        } catch (SQLException ignored) {
+            // column not present - keep "N/A"
+        }
+
+        // Split "First Last" (the last word is the last name).
+        String trimmed = fullName.trim();
+        int space = trimmed.lastIndexOf(' ');
+        String firstName = space > 0 ? trimmed.substring(0, space) : trimmed;
+        String lastName = space > 0 ? trimmed.substring(space + 1) : "-";
+
+        profileInitials = initialsOf(fullName);
+        profileNameLabel.setText(fullName);
+        profileRoleLabel.setText(roleText);
+        profileUserLabel.setText(username.isEmpty() ? "" : "@" + username);
+        profileFirstName.setText(firstName);
+        profileLastName.setText(lastName);
+        profileUsernameValue.setText(username.isEmpty() ? "-" : username);
+        profileEmail.setText(email);
+        profileRoleValue.setText(roleText);
+        profileSince.setText(memberSince);
+
+        dashboard.setVisible(false);
+        reportsPanel.setVisible(false);
+        profilePanel.setVisible(true);
+        selectMenu(profileButton);
+        profileAvatar.repaint();
+    }
+
+    private String initialsOf(String name) {
+        String[] parts = safe(name).trim().split("\\s+");
+        if (parts.length == 0 || parts[0].isEmpty()) return "?";
+        String s = parts[0].substring(0, 1);
+        if (parts.length > 1) s += parts[parts.length - 1].substring(0, 1);
+        return s.toUpperCase(Locale.ROOT);
+    }
+
+    // ================= HELPERS =================
+    private String safe(String value) {
+        return value == null ? "" : value;
+    }
+
+    private String escapeHtml(String value) {
+        return safe(value)
+                .replace("&", "&amp;")
+                .replace("<", "&lt;")
+                .replace(">", "&gt;")
+                .replace("\"", "&quot;")
+                .replace("'", "&#39;");
+    }
+
+    /**
+     * Staff can be archived while their dashboard is still open. This
+     * checks the account is still active; if not, it logs the user out.
+     *
+     * @return {@code true} if the user may continue
+     */
+    private boolean guardActiveAccount() {
+
+        if (!isStaff()) {
+            return true;   // admins cannot be archived
+        }
+
+        boolean active;
+
+        try (Connection con = requireConnection();
+             PreparedStatement pst = con.prepareStatement(ACTIVE_ACCOUNT_SQL)) {
+
+            pst.setString(1, userName);
+            pst.setString(2, ROLE_STAFF);
+
+            try (ResultSet rs = pst.executeQuery()) {
+                active = rs.next() && rs.getInt(1) > 0;
+            }
+
+        } catch (SQLException e) {
+            showDatabaseError(e);
+            return false;
+        }
+
+        if (!active) {
+            JOptionPane.showMessageDialog(
+                    this,
+                    "This account has been archived.\nYou have been logged out.",
+                    "Account Archived",
+                    JOptionPane.WARNING_MESSAGE
+            );
+            dispose();
+            new Login().setVisible(true);
+            return false;
+        }
+
+        return true;
+    }
+
+    /**
+     * Opens a database connection or fails with a clear message.
+     * {@code DBConnection.connect()} returns null when MySQL is not
+     * running, which would otherwise surface as a NullPointerException.
+     */
+    private Connection requireConnection() throws SQLException {
+        Connection connection = DBConnection.connect();
+
+        if (connection == null) {
+            throw new SQLException(
+                    "Cannot connect to the database. "
+                    + "Make sure MySQL is running in XAMPP."
+            );
+        }
+
+        return connection;
+    }
+
+    private void showDatabaseError(SQLException e) {
+        JOptionPane.showMessageDialog(
+                this,
+                "Database error:\n" + e.getMessage(),
+                "Database Error",
+                JOptionPane.ERROR_MESSAGE
+        );
+    }
+
+    // ================= WIDTH-TRACKING PANEL =================
+    /** Panel inside a scroll pane that always matches the viewport width. */
+    private static class WidthTrackingPanel extends JPanel
+            implements Scrollable {
+
+        @Override
+        public Dimension getPreferredScrollableViewportSize() {
+            return getPreferredSize();
+        }
+
+        @Override
+        public int getScrollableUnitIncrement(
+                Rectangle visibleRect, int orientation, int direction) {
+            return 16;
+        }
+
+        @Override
+        public int getScrollableBlockIncrement(
+                Rectangle visibleRect, int orientation, int direction) {
+            return orientation == SwingConstants.VERTICAL
+                    ? visibleRect.height : visibleRect.width;
+        }
+
+        @Override
+        public boolean getScrollableTracksViewportWidth() {
+            return true;
+        }
+
+        @Override
+        public boolean getScrollableTracksViewportHeight() {
+            return false;
+        }
+    }
+
+    // ================= ROUNDED PANEL =================
+    private static class RoundPanel extends JPanel {
+        private final Color backgroundColor;
+        private final int radius;
+
+        public RoundPanel(Color backgroundColor, int radius) {
+            this.backgroundColor = backgroundColor;
+            this.radius = radius;
+            setOpaque(false);
+        }
+
+        @Override
+        protected void paintComponent(Graphics graphics) {
+            Graphics2D g2 = (Graphics2D) graphics.create();
+
+            g2.setRenderingHint(
+                    RenderingHints.KEY_ANTIALIASING,
+                    RenderingHints.VALUE_ANTIALIAS_ON
+            );
+
+            g2.setColor(backgroundColor);
+            g2.fillRoundRect(
+                    0, 0, getWidth(), getHeight(),
+                    radius, radius
+            );
+
+            g2.dispose();
+            super.paintComponent(graphics);
+        }
+    }
+
+    // ================= PILL LABEL (badges) =================
+    private static class PillLabel extends JLabel {
+        private final Color fill;
+        private final Color border;
+
+        PillLabel(String text, Color fill, Color textColor, Color border) {
+            super(text, SwingConstants.CENTER);
+            this.fill = fill;
+            this.border = border;
+            setForeground(textColor);
+            setFont(new Font("Arial", Font.BOLD, 11));
+            setOpaque(false);
+        }
+
+        @Override
+        protected void paintComponent(Graphics g) {
+            Graphics2D g2 = (Graphics2D) g.create();
+            g2.setRenderingHint(RenderingHints.KEY_ANTIALIASING,
+                    RenderingHints.VALUE_ANTIALIAS_ON);
+            g2.setColor(fill);
+            g2.fillRoundRect(0, 0, getWidth() - 1, getHeight() - 1,
+                    getHeight(), getHeight());
+            g2.setColor(border);
+            g2.drawRoundRect(0, 0, getWidth() - 1, getHeight() - 1,
+                    getHeight(), getHeight());
+            g2.dispose();
+            super.paintComponent(g);
+        }
+    }
+
+    // =====================================================
+    // REPORTS PAGE COMPONENTS
+    // =====================================================
+
+    /** White rounded card with a thin purple-gray border. */
+    private static class CardPanel extends JPanel {
+
+        CardPanel() {
+            setOpaque(false);
+        }
+
+        @Override
+        protected void paintComponent(Graphics g) {
+            Graphics2D g2 = (Graphics2D) g.create();
+            g2.setRenderingHint(RenderingHints.KEY_ANTIALIASING,
+                    RenderingHints.VALUE_ANTIALIAS_ON);
+
+            g2.setColor(Color.WHITE);
+            g2.fillRoundRect(0, 0, getWidth() - 1, getHeight() - 1, 16, 16);
+
+            g2.setColor(CARD_BORDER);
+            g2.drawRoundRect(0, 0, getWidth() - 1, getHeight() - 1, 16, 16);
+
+            g2.dispose();
+            super.paintComponent(g);
+        }
+    }
+
+    /** Rounded button with a hover color. */
+    private static class RoundButton extends JButton {
+
+        private final Color fill;
+        private final Color hoverFill;
+        private final Color border;
+        private boolean hover;
+
+        RoundButton(String text, Color fill, Color hoverFill,
+                    Color textColor, Color border) {
+            super(text);
+            this.fill = fill;
+            this.hoverFill = hoverFill;
+            this.border = border;
+
+            setForeground(textColor);
+            setFont(new Font("Arial", Font.BOLD, 12));
+            setContentAreaFilled(false);
+            setBorderPainted(false);
+            setFocusPainted(false);
+            setOpaque(false);
+            setMargin(new Insets(0, 4, 0, 4));
+            setCursor(new Cursor(Cursor.HAND_CURSOR));
+
+            addMouseListener(new MouseAdapter() {
+                @Override
+                public void mouseEntered(MouseEvent e) {
+                    hover = true;
+                    repaint();
+                }
+
+                @Override
+                public void mouseExited(MouseEvent e) {
+                    hover = false;
+                    repaint();
+                }
+            });
+        }
+
+        @Override
+        protected void paintComponent(Graphics g) {
+            Graphics2D g2 = (Graphics2D) g.create();
+            g2.setRenderingHint(RenderingHints.KEY_ANTIALIASING,
+                    RenderingHints.VALUE_ANTIALIAS_ON);
+
+            g2.setColor(hover ? hoverFill : fill);
+            g2.fillRoundRect(0, 0, getWidth() - 1, getHeight() - 1, 12, 12);
+
+            if (border != null) {
+                g2.setColor(border);
+                g2.drawRoundRect(0, 0, getWidth() - 1, getHeight() - 1,
+                        12, 12);
+            }
+
+            g2.dispose();
+            super.paintComponent(g);
+        }
+    }
+
+    /** Small rounded square with a symbol in it (metric / header icon). */
+    private static class IconBox extends JComponent {
+
+        private final String glyph;
+        private final Color fill;
+        private final Color fg;
+        private final Color border;
+        private final int fontSize;
+
+        IconBox(String glyph, Color fill, Color fg, Color border,
+                int fontSize) {
+            this.glyph = glyph;
+            this.fill = fill;
+            this.fg = fg;
+            this.border = border;
+            this.fontSize = fontSize;
+        }
+
+        @Override
+        protected void paintComponent(Graphics g) {
+            Graphics2D g2 = (Graphics2D) g.create();
+            g2.setRenderingHint(RenderingHints.KEY_ANTIALIASING,
+                    RenderingHints.VALUE_ANTIALIAS_ON);
+            g2.setRenderingHint(RenderingHints.KEY_TEXT_ANTIALIASING,
+                    RenderingHints.VALUE_TEXT_ANTIALIAS_ON);
+
+            g2.setColor(fill);
+            g2.fillRoundRect(0, 0, getWidth() - 1, getHeight() - 1, 10, 10);
+            g2.setColor(border);
+            g2.drawRoundRect(0, 0, getWidth() - 1, getHeight() - 1, 10, 10);
+
+            g2.setColor(fg);
+            g2.setFont(new Font("Dialog", Font.BOLD, fontSize));
+            FontMetrics fm = g2.getFontMetrics();
+            g2.drawString(glyph,
+                    (getWidth() - fm.stringWidth(glyph)) / 2,
+                    (getHeight() - fm.getHeight()) / 2 + fm.getAscent());
+
+            g2.dispose();
+        }
+    }
+
+    /** Text field that shows gray hint text while it is empty. */
+    private static class HintField extends JTextField {
+
+        private final String hint;
+
+        HintField(String hint) {
+            this.hint = hint;
+        }
+
+        @Override
+        protected void paintComponent(Graphics g) {
+            super.paintComponent(g);
+
+            if (getText().isEmpty()) {
+                Graphics2D g2 = (Graphics2D) g.create();
+                g2.setRenderingHint(RenderingHints.KEY_TEXT_ANTIALIASING,
+                        RenderingHints.VALUE_TEXT_ANTIALIAS_ON);
+                g2.setColor(new Color(160, 155, 168));
+                g2.setFont(getFont());
+                FontMetrics fm = g2.getFontMetrics();
+                g2.drawString(hint, getInsets().left,
+                        (getHeight() - fm.getHeight()) / 2 + fm.getAscent());
+                g2.dispose();
+            }
+        }
+    }
+
+    /** Doughnut chart of Completed / Cancelled / Unpaid with a legend. */
+    private static class DonutChart extends JPanel {
+
+        private static final String[] LABELS = {
+            "Completed Orders", "Cancelled Bookings", "Unpaid Orders"
+        };
+
+        private static final Color[] COLORS = {GREEN, RED, AMBER};
+
+        private int[] values = {0, 0, 0};
+
+        DonutChart() {
+            setOpaque(false);
+        }
+
+        void setData(int completed, int cancelled, int unpaid) {
+            values = new int[]{completed, cancelled, unpaid};
+            repaint();
+        }
+
+        @Override
+        protected void paintComponent(Graphics g) {
+            Graphics2D g2 = (Graphics2D) g.create();
+            g2.setRenderingHint(RenderingHints.KEY_ANTIALIASING,
+                    RenderingHints.VALUE_ANTIALIAS_ON);
+            g2.setRenderingHint(RenderingHints.KEY_TEXT_ANTIALIASING,
+                    RenderingHints.VALUE_TEXT_ANTIALIAS_ON);
+
+            int total = values[0] + values[1] + values[2];
+
+            int size = Math.max(20, Math.min(getHeight() - 8, 70));
+            int groupWidth = size + 40 + 210;
+            int x0 = Math.max(0, (getWidth() - groupWidth) / 2);
+            int y0 = (getHeight() - size) / 2;
+
+            float thickness = size * 0.17f;
+            double inset = thickness / 2.0;
+
+            g2.setStroke(new BasicStroke(thickness, BasicStroke.CAP_BUTT,
+                    BasicStroke.JOIN_MITER));
+
+            if (total == 0) {
+                g2.setColor(CARD_BORDER);
+                g2.draw(new Ellipse2D.Double(x0 + inset, y0 + inset,
+                        size - thickness, size - thickness));
+            } else {
+                double start = 90;
+
+                for (int i = 0; i < values.length; i++) {
+                    if (values[i] <= 0) {
+                        continue;
+                    }
+
+                    double extent = -360.0 * values[i] / total;
+
+                    g2.setColor(COLORS[i]);
+                    g2.draw(new Arc2D.Double(x0 + inset, y0 + inset,
+                            size - thickness, size - thickness,
+                            start, extent, Arc2D.OPEN));
+
+                    start += extent;
+                }
+            }
+
+            // legend
+            g2.setFont(new Font("Arial", Font.PLAIN, 12));
+            FontMetrics fm = g2.getFontMetrics();
+
+            int rowHeight = 20;
+            int legendX = x0 + size + 40;
+            int legendY = (getHeight() - rowHeight * 3) / 2;
+
+            for (int i = 0; i < LABELS.length; i++) {
+                int rowY = legendY + i * rowHeight;
+
+                g2.setColor(COLORS[i]);
+                g2.fill(new Ellipse2D.Double(legendX, rowY + 5, 10, 10));
+
+                g2.setColor(TEXT);
+                g2.drawString(LABELS[i] + "  (" + values[i] + ")",
+                        legendX + 18,
+                        rowY + (rowHeight - fm.getHeight()) / 2
+                                + fm.getAscent());
+            }
+
+            g2.dispose();
+        }
+    }
+
+    /** Table cell that draws a colored status pill (Completed, Paid...). */
+    private static class BadgeRenderer extends JLabel
+            implements TableCellRenderer {
+
+        private Color fill = VERY_LIGHT_PURPLE;
+        private Color fg = PURPLE;
+        private Color border = LIGHT_PURPLE;
+        private Color rowBackground = Color.WHITE;
+        private String badgeText = "";
+
+        BadgeRenderer() {
+            setOpaque(false);
+            setFont(new Font("Arial", Font.BOLD, 11));
+        }
+
+        @Override
+        public Component getTableCellRendererComponent(
+                JTable table, Object value, boolean isSelected,
+                boolean hasFocus, int row, int column) {
+
+            badgeText = value == null ? "" : value.toString();
+            rowBackground = isSelected ? ROW_SELECTED : Color.WHITE;
+
+            String key = badgeText.toLowerCase(Locale.ROOT);
+
+            if (key.equals("completed") || key.equals("paid")) {
+                fill = GREEN_SOFT;
+                fg = GREEN;
+                border = GREEN_BORDER;
+            } else if (key.equals("cancelled")) {
+                fill = RED_SOFT;
+                fg = RED;
+                border = RED_BORDER;
+            } else if (key.equals("not paid")) {
+                fill = AMBER_SOFT;
+                fg = AMBER;
+                border = AMBER_BORDER;
+            } else {
+                fill = VERY_LIGHT_PURPLE;
+                fg = PURPLE;
+                border = LIGHT_PURPLE;
+            }
+
+            return this;
+        }
+
+        @Override
+        protected void paintComponent(Graphics g) {
+            Graphics2D g2 = (Graphics2D) g.create();
+            g2.setRenderingHint(RenderingHints.KEY_ANTIALIASING,
+                    RenderingHints.VALUE_ANTIALIAS_ON);
+            g2.setRenderingHint(RenderingHints.KEY_TEXT_ANTIALIASING,
+                    RenderingHints.VALUE_TEXT_ANTIALIAS_ON);
+
+            g2.setColor(rowBackground);
+            g2.fillRect(0, 0, getWidth(), getHeight());
+
+            g2.setFont(getFont());
+            FontMetrics fm = g2.getFontMetrics();
+
+            int pillWidth = fm.stringWidth(badgeText) + 20;
+            int pillHeight = 20;
+            int x = 12;
+            int y = (getHeight() - pillHeight) / 2;
+
+            g2.setColor(fill);
+            g2.fillRoundRect(x, y, pillWidth, pillHeight, 10, 10);
+            g2.setColor(border);
+            g2.drawRoundRect(x, y, pillWidth, pillHeight, 10, 10);
+
+            g2.setColor(fg);
+            g2.drawString(badgeText, x + 10,
+                    y + (pillHeight - fm.getHeight()) / 2 + fm.getAscent());
+
+            g2.dispose();
+        }
+    }
+
+    // =====================================================
+    // REPORT CALENDAR
+    // Unlike the customer booking calendar, reports need
+    // PAST dates, so every date can be picked (including
+    // Sundays). Has year buttons, Today and Clear.
+    // =====================================================
+
+    private static class ReportCalendarDialog extends JDialog {
+
+        private static final String[] WEEKDAYS = {
+            "Su", "Mo", "Tu", "We", "Th", "Fr", "Sa"
+        };
+
+        // 1 row of weekday names + 6 week rows = 7 rows of 7 cells.
+        private static final int GRID_ROWS = 7;
+
+        private final LocalDate currentSelection;
+
+        /** Receives the picked date, or null when "Clear" is pressed. */
+        private final Consumer<LocalDate> onPick;
+
+        private YearMonth shownMonth;
+
+        private final JLabel monthLabel =
+                new JLabel("", SwingConstants.CENTER);
+
+        private final JPanel dayGrid =
+                new JPanel(new GridLayout(GRID_ROWS, 7, 4, 4));
+
+        ReportCalendarDialog(
+                Frame owner,
+                LocalDate currentSelection,
+                Consumer<LocalDate> onPick
+        ) {
+            super(owner, "Select Date", true);
+
+            this.currentSelection = currentSelection;
+            this.onPick = onPick;
+
+            this.shownMonth = YearMonth.from(
+                    currentSelection != null
+                            ? currentSelection
+                            : LocalDate.now());
+
+            JPanel root = new JPanel(new BorderLayout(0, 10));
+            root.setBackground(Color.WHITE);
+            root.setBorder(BorderFactory.createEmptyBorder(15, 15, 15, 15));
+
+            root.add(buildHeader(), BorderLayout.NORTH);
+
+            dayGrid.setBackground(Color.WHITE);
+            dayGrid.setPreferredSize(new Dimension(330, 280));
+            root.add(dayGrid, BorderLayout.CENTER);
+
+            root.add(buildFooter(), BorderLayout.SOUTH);
+
+            setContentPane(root);
+
+            renderMonth();
+
+            pack();
+            setResizable(false);
+            setLocationRelativeTo(owner);
+        }
+
+        private JPanel buildHeader() {
+
+            JButton prevYear = navButton("\u00AB", () ->
+                    shownMonth = shownMonth.minusYears(1));
+            JButton prevMonth = navButton("\u2039", () ->
+                    shownMonth = shownMonth.minusMonths(1));
+            JButton nextMonth = navButton("\u203A", () ->
+                    shownMonth = shownMonth.plusMonths(1));
+            JButton nextYear = navButton("\u00BB", () ->
+                    shownMonth = shownMonth.plusYears(1));
+
+            monthLabel.setFont(new Font("Arial", Font.BOLD, 15));
+            monthLabel.setForeground(TEXT);
+
+            JPanel left = new JPanel(new FlowLayout(FlowLayout.LEFT, 4, 0));
+            left.setOpaque(false);
+            left.add(prevYear);
+            left.add(prevMonth);
+
+            JPanel right = new JPanel(new FlowLayout(FlowLayout.RIGHT, 4, 0));
+            right.setOpaque(false);
+            right.add(nextMonth);
+            right.add(nextYear);
+
+            JPanel header = new JPanel(new BorderLayout());
+            header.setBackground(Color.WHITE);
+            header.add(left, BorderLayout.WEST);
+            header.add(monthLabel, BorderLayout.CENTER);
+            header.add(right, BorderLayout.EAST);
+
+            return header;
+        }
+
+        private JPanel buildFooter() {
+
+            JButton today = footerButton("Today");
+            today.addActionListener(e -> {
+                onPick.accept(LocalDate.now());
+                dispose();
+            });
+
+            JButton clear = footerButton("Clear");
+            clear.addActionListener(e -> {
+                onPick.accept(null);
+                dispose();
+            });
+
+            JPanel footer = new JPanel(new FlowLayout(FlowLayout.CENTER, 10, 0));
+            footer.setBackground(Color.WHITE);
+            footer.add(today);
+            footer.add(clear);
+
+            return footer;
+        }
+
+        private JButton navButton(String text, Runnable change) {
+            JButton button = new JButton(text);
+            button.setFont(new Font("Arial", Font.BOLD, 16));
+            button.setForeground(PURPLE);
+            button.setBackground(VERY_LIGHT_PURPLE);
+            button.setBorderPainted(false);
+            button.setFocusPainted(false);
+            button.setMargin(new Insets(0, 0, 0, 0));
+            button.setPreferredSize(new Dimension(34, 30));
+            button.setCursor(new Cursor(Cursor.HAND_CURSOR));
+
+            button.addActionListener(e -> {
+                change.run();
+                renderMonth();
+            });
+
+            return button;
+        }
+
+        private JButton footerButton(String text) {
+            JButton button = new JButton(text);
+            button.setFont(new Font("Arial", Font.BOLD, 12));
+            button.setForeground(PURPLE);
+            button.setBackground(VERY_LIGHT_PURPLE);
+            button.setBorderPainted(false);
+            button.setFocusPainted(false);
+            button.setPreferredSize(new Dimension(90, 30));
+            button.setCursor(new Cursor(Cursor.HAND_CURSOR));
+            return button;
+        }
+
+        private void renderMonth() {
+
+            LocalDate today = LocalDate.now();
+
+            monthLabel.setText(
+                    shownMonth.getMonth().getDisplayName(
+                            TextStyle.FULL, Locale.ENGLISH)
+                    + " " + shownMonth.getYear());
+
+            dayGrid.removeAll();
+
+            for (String name : WEEKDAYS) {
+                JLabel heading = new JLabel(name, SwingConstants.CENTER);
+                heading.setFont(new Font("Arial", Font.BOLD, 12));
+                heading.setForeground(GRAY);
+                dayGrid.add(heading);
+            }
+
+            int cells = 7;
+
+            int leadingBlanks =
+                    shownMonth.atDay(1).getDayOfWeek().getValue() % 7;
+
+            for (int i = 0; i < leadingBlanks; i++) {
+                dayGrid.add(new JLabel(""));
+                cells++;
+            }
+
+            for (int day = 1; day <= shownMonth.lengthOfMonth(); day++) {
+                dayGrid.add(createDayButton(shownMonth.atDay(day), today));
+                cells++;
+            }
+
+            // Pad to a full grid so every month has identical cell sizes.
+            while (cells < GRID_ROWS * 7) {
+                dayGrid.add(new JLabel(""));
+                cells++;
+            }
+
+            dayGrid.revalidate();
+            dayGrid.repaint();
+        }
+
+        private JButton createDayButton(LocalDate date, LocalDate today) {
+
+            JButton button = new JButton(String.valueOf(date.getDayOfMonth()));
+
+            button.setFont(new Font("Arial", Font.PLAIN, 13));
+            button.setMargin(new Insets(0, 0, 0, 0));
+            button.setHorizontalAlignment(SwingConstants.CENTER);
+            button.setFocusPainted(false);
+            button.setBorderPainted(false);
+            button.setOpaque(true);
+            button.setCursor(new Cursor(Cursor.HAND_CURSOR));
+
+            if (date.equals(currentSelection)) {
+                button.setBackground(PURPLE);
+                button.setForeground(Color.WHITE);
+
+            } else if (date.equals(today)) {
+                button.setBackground(LIGHT_PURPLE);
+                button.setForeground(PURPLE);
+
+            } else {
+                button.setBackground(Color.WHITE);
+                button.setForeground(TEXT);
+            }
+
+            button.addActionListener(e -> {
+                onPick.accept(date);
+                dispose();
+            });
+
+            return button;
+        }
+    }
+
+    // ================= MAIN (OPTIONAL TEST) =================
+    public static void main(String[] args) {
+        SwingUtilities.invokeLater(() ->
+                new AdminBookingsPage("Admin", "admin")
+        );
+    }
+}

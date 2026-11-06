@@ -1,0 +1,680 @@
+package laundryshop_bookingsystem;
+
+import javax.swing.*;
+import javax.swing.table.DefaultTableModel;
+import java.awt.*;
+import java.awt.event.MouseAdapter;
+import java.awt.event.MouseEvent;
+import java.sql.Connection;
+import java.sql.PreparedStatement;
+import java.sql.ResultSet;
+import java.sql.SQLException;
+import java.sql.Statement;
+import java.sql.Timestamp;
+import java.time.format.DateTimeFormatter;
+import java.util.Arrays;
+import java.util.regex.Pattern;
+
+/**
+ * Admin-only screen for managing staff accounts.
+ *
+ * <p>Each staff member has a login account in {@code users} and a record in
+ * the {@code staff} table ({@code staff_id}, {@code staff_name}) linked by
+ * {@code user_id}. An Admin can create staff and <b>archive</b> staff who
+ * have resigned. An archived account keeps its record but can no longer log in;
+ * it can be restored later from the "Archived Staff" view.</p>
+ *
+ * <p>Any other role that opens this screen is sent back to the
+ * dashboard.</p>
+ */
+public class Staffmanagement extends JFrame {
+
+    // =====================================================
+    // ROLES AND VIEWS
+    // =====================================================
+
+    private static final String ROLE_ADMIN = "Admin";
+    private static final String ROLE_STAFF = "Staff";
+
+    private static final String VIEW_ACTIVE = "Active Staff";
+    private static final String VIEW_ARCHIVED = "Archived Staff";
+    
+    
+    
+
+    // =====================================================
+    // VALIDATION RULES
+    // =====================================================
+
+    private static final int MIN_PASSWORD_LENGTH = 6;
+
+    private static final Pattern EMAIL_PATTERN =
+            Pattern.compile("^[^@\\s]+@[^@\\s]+\\.[^@\\s]+$");
+
+    // =====================================================
+    // SQL
+    // =====================================================
+
+    /** Adds a staff record for any Staff login that does not have one. */
+    private static final String SYNC_STAFF_SQL =
+            "INSERT INTO staff (user_id, staff_name) "
+            + "SELECT u.user_id, u.full_name FROM users u "
+            + "WHERE LOWER(u.role) = LOWER(?) "
+            + "AND NOT EXISTS "
+            + "(SELECT 1 FROM staff s WHERE s.user_id = u.user_id)";
+
+    private static final String SELECT_STAFF_SQL =
+            "SELECT s.staff_id, s.staff_name, u.username, u.email, "
+            + "u.archived_at "
+            + "FROM staff s JOIN users u ON u.user_id = s.user_id "
+            + "WHERE LOWER(u.role) = LOWER(?) AND u.is_archived = ? "
+            + "ORDER BY s.staff_name";
+
+    private static final String EXISTS_SQL =
+            "SELECT 1 FROM users WHERE username = ? OR email = ?";
+
+    private static final String INSERT_STAFF_SQL =
+            "INSERT INTO users (full_name, username, email, password, role) "
+            + "VALUES (?, ?, ?, ?, ?)";
+
+    private static final String INSERT_STAFF_RECORD_SQL =
+            "INSERT INTO staff (user_id, staff_name) VALUES (?, ?)";
+
+    private static final String ARCHIVE_SQL =
+            "UPDATE users u JOIN staff s ON s.user_id = u.user_id "
+            + "SET u.is_archived = 1, u.archived_at = NOW() "
+            + "WHERE s.staff_id = ? AND LOWER(u.role) = LOWER(?) "
+            + "AND u.is_archived = 0";
+
+    private static final String RESTORE_SQL =
+            "UPDATE users u JOIN staff s ON s.user_id = u.user_id "
+            + "SET u.is_archived = 0, u.archived_at = NULL "
+            + "WHERE s.staff_id = ? AND LOWER(u.role) = LOWER(?) "
+            + "AND u.is_archived = 1";
+
+    // =====================================================
+    // TABLE COLUMNS
+    // =====================================================
+
+    private static final String[] COLUMNS_ACTIVE =
+            {"Staff ID", "Staff Name", "Username", "Email"};
+
+    private static final String[] COLUMNS_ARCHIVED =
+            {"Staff ID", "Staff Name", "Username", "Email", "Archived On"};
+
+    private static final int COLUMN_ID = 0;
+    private static final int COLUMN_FULL_NAME = 1;
+
+    private static final DateTimeFormatter ARCHIVED_ON_FORMAT =
+            DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm");
+
+    // =====================================================
+    // THEME
+    // =====================================================
+
+    private static final Color PURPLE = new Color(105, 55, 145);
+    private static final Color LIGHT_PURPLE = new Color(220, 205, 235);
+    private static final Color VERY_LIGHT_PURPLE = new Color(245, 239, 248);
+    private static final Color BACKGROUND = new Color(248, 245, 250);
+    private static final Color TEXT = new Color(55, 45, 65);
+    private static final Color GRAY = new Color(110, 105, 115);
+    private static final Color RED = new Color(190, 65, 65);
+
+    private static final Font FONT_TITLE = new Font("Arial", Font.BOLD, 24);
+    private static final Font FONT_SECTION = new Font("Arial", Font.BOLD, 17);
+    private static final Font FONT_LABEL = new Font("Arial", Font.BOLD, 13);
+    private static final Font FONT_BODY = new Font("Arial", Font.PLAIN, 13);
+    private static final Font FONT_HINT = new Font("Arial", Font.PLAIN, 11);
+
+    // =====================================================
+    // STATE
+    // =====================================================
+
+    private final String userName;
+    private final String role;
+
+    private DefaultTableModel tableModel;
+    private JTable staffTable;
+    private JComboBox<String> viewBox;
+    private JButton archiveButton;
+    private JButton restoreButton;
+    private JLabel hintLabel;
+
+    private JTextField firstNameField;
+    private JTextField lastNameField;
+    private JTextField usernameField;
+    private JTextField emailField;
+    private JPasswordField passwordField;
+
+    // =====================================================
+    // CONSTRUCTION
+    // =====================================================
+
+    /**
+     * Opens the staff management screen.
+     *
+     * @param userName display name of the logged-in user
+     * @param role     role of the logged-in user; must be {@code Admin}
+     */
+    public Staffmanagement(String userName, String role) {
+
+        this.userName = userName;
+        this.role = role == null ? "" : role;
+
+        setTitle("Lavandera - Staff Accounts");
+        setSize(1200, 750);
+        setDefaultCloseOperation(JFrame.EXIT_ON_CLOSE);
+        setLocationRelativeTo(null);
+        setResizable(true);
+
+        if (!ROLE_ADMIN.equalsIgnoreCase(this.role)) {
+            denyAccess();
+            return;
+        }
+
+        buildPage();
+
+        ResponsiveUI.enable(this, 1200, 750);
+    }
+
+    private void denyAccess() {
+
+        JOptionPane.showMessageDialog(
+                null,
+                "Only an Admin can manage staff accounts.",
+                "Access Denied",
+                JOptionPane.WARNING_MESSAGE
+        );
+
+        new AdminBookingsPage(userName, role);
+        dispose();
+    }
+
+    private void buildPage() {
+
+        JPanel main = new JPanel(null);
+        main.setBackground(BACKGROUND);
+        setContentPane(main);
+
+        addLabel(main, "Staff Accounts", 50, 35, 400, 40, FONT_TITLE, TEXT);
+        addLabel(
+                main,
+                "Add staff members and archive those who have resigned",
+                52, 75, 500, 25, FONT_BODY, GRAY
+        );
+
+        JButton backButton = createButton(
+                "← Back", PURPLE, VERY_LIGHT_PURPLE
+        );
+        backButton.setBounds(50, 115, 100, 35);
+        main.add(backButton);
+        backButton.addActionListener(e -> {
+            new AdminBookingsPage(userName, role);
+            dispose();
+        });
+
+        buildStaffList(main);
+        buildAddForm(main);
+
+        refreshView();
+    }
+
+    private void buildStaffList(JPanel main) {
+
+        viewBox = new JComboBox<>(new String[]{VIEW_ACTIVE, VIEW_ARCHIVED});
+        viewBox.setFont(FONT_BODY);
+        viewBox.setBounds(490, 117, 200, 34);
+        main.add(viewBox);
+        viewBox.addActionListener(e -> refreshView());
+
+        tableModel = new DefaultTableModel(COLUMNS_ACTIVE, 0) {
+            @Override
+            public boolean isCellEditable(int row, int column) {
+                return false;
+            }
+        };
+
+        staffTable = new JTable(tableModel);
+        staffTable.setRowHeight(32);
+        staffTable.setFont(FONT_BODY);
+        staffTable.setForeground(TEXT);
+        staffTable.setSelectionBackground(LIGHT_PURPLE);
+        staffTable.setSelectionForeground(TEXT);
+        staffTable.setSelectionMode(ListSelectionModel.SINGLE_SELECTION);
+        staffTable.getTableHeader().setFont(FONT_LABEL);
+        staffTable.getTableHeader().setReorderingAllowed(false);
+
+        JScrollPane scrollPane = new JScrollPane(staffTable);
+        scrollPane.setBounds(50, 170, 640, 420);
+        scrollPane.setBorder(BorderFactory.createLineBorder(LIGHT_PURPLE));
+        main.add(scrollPane);
+
+        // The two buttons share one spot; only one is visible at a time
+        archiveButton = createButton("Archive Staff", Color.WHITE, RED);
+        archiveButton.setBounds(50, 605, 200, 42);
+        main.add(archiveButton);
+        archiveButton.addActionListener(e -> changeArchiveState(true));
+
+        restoreButton = createButton("Restore Staff", Color.WHITE, PURPLE);
+        restoreButton.setBounds(50, 605, 200, 42);
+        main.add(restoreButton);
+        restoreButton.addActionListener(e -> changeArchiveState(false));
+
+        hintLabel = new JLabel();
+        hintLabel.setFont(FONT_HINT);
+        hintLabel.setForeground(GRAY);
+        hintLabel.setBounds(52, 650, 640, 20);
+        main.add(hintLabel);
+    }
+
+    private void buildAddForm(JPanel main) {
+
+        addLabel(
+                main, "Add New Staff", 740, 170, 350, 30, FONT_SECTION, PURPLE
+        );
+
+        firstNameField = addTextField(main, "First Name", 740, 195);
+        lastNameField = addTextField(main, "Last Name", 740, 265);
+        usernameField = addTextField(main, "Username", 740, 335);
+        emailField = addTextField(main, "Email", 740, 405);
+
+        addLabel(
+                main, "Password (min. " + MIN_PASSWORD_LENGTH + " characters)",
+                740, 475, 350, 22, FONT_LABEL, TEXT
+        );
+
+        passwordField = new JPasswordField();
+        passwordField.setFont(FONT_BODY);
+        passwordField.setBounds(740, 500, 350, 38);
+        main.add(passwordField);
+
+        JButton addButton = createButton("Add Staff", Color.WHITE, PURPLE);
+        addButton.setBounds(740, 555, 350, 46);
+        main.add(addButton);
+        addButton.addActionListener(e -> addStaff());
+    }
+
+    // =====================================================
+    // VIEW (ACTIVE / ARCHIVED)
+    // =====================================================
+
+    private boolean isArchivedView() {
+        return VIEW_ARCHIVED.equals(viewBox.getSelectedItem());
+    }
+
+    /** Shows the right buttons and hint for the chosen view, then reloads. */
+    private void refreshView() {
+
+        boolean archivedView = isArchivedView();
+
+        archiveButton.setVisible(!archivedView);
+        restoreButton.setVisible(archivedView);
+
+        hintLabel.setText(archivedView
+                ? "Archived staff cannot log in. Restore an account to give access back."
+                : "Archive staff who resign: they can no longer log in, "
+                  + "but their record is kept.");
+
+        loadStaff();
+    }
+
+    private void loadStaff() {
+
+        boolean archivedView = isArchivedView();
+
+        tableModel.setRowCount(0);
+        tableModel.setColumnIdentifiers(
+                archivedView ? COLUMNS_ARCHIVED : COLUMNS_ACTIVE
+        );
+        staffTable.getColumnModel().getColumn(COLUMN_ID).setMaxWidth(80);
+
+        try (Connection conn = requireConnection()) {
+
+            // Staff promoted directly in the database get a staff record
+            syncStaffRecords(conn);
+
+            try (PreparedStatement pst =
+                         conn.prepareStatement(SELECT_STAFF_SQL)) {
+
+                pst.setString(1, ROLE_STAFF);
+                pst.setInt(2, archivedView ? 1 : 0);
+
+                try (ResultSet rs = pst.executeQuery()) {
+                    while (rs.next()) {
+                        tableModel.addRow(toRow(rs, archivedView));
+                    }
+                }
+            }
+
+        } catch (SQLException e) {
+            showDatabaseError(e);
+        }
+    }
+
+    private void syncStaffRecords(Connection conn) throws SQLException {
+
+        try (PreparedStatement pst = conn.prepareStatement(SYNC_STAFF_SQL)) {
+            pst.setString(1, ROLE_STAFF);
+            pst.executeUpdate();
+        }
+    }
+
+    private static Object[] toRow(ResultSet rs, boolean archivedView)
+            throws SQLException {
+
+        Object id = rs.getInt("staff_id");
+        String fullName = rs.getString("staff_name");
+        String username = rs.getString("username");
+        String email = rs.getString("email");
+
+        if (!archivedView) {
+            return new Object[]{id, fullName, username, email};
+        }
+
+        Timestamp archivedAt = rs.getTimestamp("archived_at");
+        String archivedOn = archivedAt == null
+                ? "" : archivedAt.toLocalDateTime().format(ARCHIVED_ON_FORMAT);
+
+        return new Object[]{id, fullName, username, email, archivedOn};
+    }
+
+    // =====================================================
+    // ARCHIVE / RESTORE
+    // =====================================================
+
+    /**
+     * Archives (or restores) the selected staff member.
+     *
+     * @param archive {@code true} to archive, {@code false} to restore
+     */
+    private void changeArchiveState(boolean archive) {
+
+        int row = staffTable.getSelectedRow();
+
+        if (row < 0) {
+            showWarning("Please select a staff member from the list first.");
+            return;
+        }
+
+        int staffId = ((Integer) tableModel.getValueAt(row, COLUMN_ID)).intValue();
+        String fullName = String.valueOf(
+                tableModel.getValueAt(row, COLUMN_FULL_NAME)
+        );
+
+        String question = archive
+                ? "Archive " + fullName + "?\n\n"
+                  + "They will no longer be able to log in.\n"
+                  + "Their record is kept and you can restore it later."
+                : "Restore " + fullName + "?\n\n"
+                  + "They will be able to log in as staff again.";
+
+        int choice = JOptionPane.showConfirmDialog(
+                this,
+                question,
+                archive ? "Confirm Archive" : "Confirm Restore",
+                JOptionPane.YES_NO_OPTION
+        );
+
+        if (choice != JOptionPane.YES_OPTION) {
+            return;
+        }
+
+        String sql = archive ? ARCHIVE_SQL : RESTORE_SQL;
+
+        try (Connection conn = requireConnection();
+             PreparedStatement pst = conn.prepareStatement(sql)) {
+
+            pst.setInt(1, staffId);
+            pst.setString(2, ROLE_STAFF);
+            pst.executeUpdate();
+
+            loadStaff();
+
+        } catch (SQLException e) {
+            showDatabaseError(e);
+        }
+    }
+
+    // =====================================================
+    // ADD STAFF
+    // =====================================================
+
+    private void addStaff() {
+
+        String firstName = firstNameField.getText().trim();
+        String lastName = lastNameField.getText().trim();
+        if (firstName.isEmpty() || lastName.isEmpty()) {
+            showWarning("Please enter both First Name and Last Name.");
+            return;
+        }
+        String fullName = firstName + " " + lastName;
+        String username = usernameField.getText().trim();
+        String email = emailField.getText().trim();
+
+        char[] passwordChars = passwordField.getPassword();
+        String password = new String(passwordChars);
+        Arrays.fill(passwordChars, '\0');   // do not keep it in memory
+
+        if (!validateNewStaff(fullName, username, email, password)) {
+            return;
+        }
+
+        try (Connection conn = requireConnection()) {
+
+            if (accountExists(conn, username, email)) {
+                showWarning("That username or email is already registered.");
+                return;
+            }
+
+            // The login account and the staff record are saved together:
+            // either both succeed or neither is kept.
+            conn.setAutoCommit(false);
+
+            try {
+                int userId = insertStaffAccount(
+                        conn, fullName, username, email, password
+                );
+                insertStaffRecord(conn, userId, fullName);
+                conn.commit();
+
+            } catch (SQLException e) {
+                conn.rollback();
+                throw e;
+            }
+
+            JOptionPane.showMessageDialog(
+                    this, "Staff account created for " + fullName + "."
+            );
+
+            clearForm();
+
+            // New staff appear in the Active list
+            viewBox.setSelectedItem(VIEW_ACTIVE);
+            refreshView();
+
+        } catch (SQLException e) {
+            showDatabaseError(e);
+        }
+    }
+
+    /** Creates the login account and returns its new {@code user_id}. */
+    private int insertStaffAccount(
+            Connection conn, String fullName, String username,
+            String email, String password
+    ) throws SQLException {
+
+        try (PreparedStatement pst = conn.prepareStatement(
+                INSERT_STAFF_SQL, Statement.RETURN_GENERATED_KEYS)) {
+
+            pst.setString(1, fullName);
+            pst.setString(2, username);
+            pst.setString(3, email);
+            pst.setString(4, password);
+            pst.setString(5, ROLE_STAFF);
+            pst.executeUpdate();
+
+            try (ResultSet keys = pst.getGeneratedKeys()) {
+                if (keys.next()) {
+                    return keys.getInt(1);
+                }
+            }
+        }
+
+        throw new SQLException("Could not read the new account id.");
+    }
+
+    private void insertStaffRecord(
+            Connection conn, int userId, String staffName
+    ) throws SQLException {
+
+        try (PreparedStatement pst =
+                     conn.prepareStatement(INSERT_STAFF_RECORD_SQL)) {
+
+            pst.setInt(1, userId);
+            pst.setString(2, staffName);
+            pst.executeUpdate();
+        }
+    }
+
+    private boolean validateNewStaff(
+            String fullName, String username, String email, String password
+    ) {
+        if (fullName.isEmpty() || username.isEmpty()
+                || email.isEmpty() || password.isEmpty()) {
+
+            showWarning("Please complete all fields.");
+            return false;
+        }
+
+        if (!EMAIL_PATTERN.matcher(email).matches()) {
+            showWarning("Please enter a valid email address.");
+            emailField.requestFocusInWindow();
+            return false;
+        }
+
+        if (password.length() < MIN_PASSWORD_LENGTH) {
+            showWarning(
+                    "Password must be at least "
+                    + MIN_PASSWORD_LENGTH + " characters."
+            );
+            passwordField.requestFocusInWindow();
+            return false;
+        }
+
+        return true;
+    }
+
+    private boolean accountExists(
+            Connection conn, String username, String email
+    ) throws SQLException {
+
+        try (PreparedStatement pst = conn.prepareStatement(EXISTS_SQL)) {
+
+            pst.setString(1, username);
+            pst.setString(2, email);
+
+            try (ResultSet rs = pst.executeQuery()) {
+                return rs.next();
+            }
+        }
+    }
+
+    private void clearForm() {
+        firstNameField.setText("");
+        lastNameField.setText("");
+        usernameField.setText("");
+        emailField.setText("");
+        passwordField.setText("");
+    }
+
+    // =====================================================
+    // DATABASE AND MESSAGE HELPERS
+    // =====================================================
+
+    /** Opens a connection or fails with a clear, user-friendly message. */
+    private static Connection requireConnection() throws SQLException {
+
+        Connection conn = DBConnection.connect();
+
+        if (conn == null) {
+            throw new SQLException(
+                    "Cannot connect to the database. "
+                    + "Make sure MySQL is running in XAMPP."
+            );
+        }
+
+        return conn;
+    }
+
+    private void showWarning(String message) {
+        JOptionPane.showMessageDialog(
+                this, message, "Staff Accounts", JOptionPane.WARNING_MESSAGE
+        );
+    }
+
+    private void showDatabaseError(SQLException e) {
+        JOptionPane.showMessageDialog(
+                this,
+                "Database error:\n" + e.getMessage(),
+                "Database Error",
+                JOptionPane.ERROR_MESSAGE
+        );
+    }
+
+    // =====================================================
+    // UI FACTORY HELPERS
+    // =====================================================
+
+    private static void addLabel(
+            JPanel parent, String text,
+            int x, int y, int width, int height,
+            Font font, Color color
+    ) {
+        JLabel label = new JLabel(text);
+        label.setFont(font);
+        label.setForeground(color);
+        label.setBounds(x, y, width, height);
+        parent.add(label);
+    }
+
+    /** Adds a bold caption with a text field underneath it. */
+    private static JTextField addTextField(
+            JPanel parent, String caption, int x, int y
+    ) {
+        addLabel(parent, caption, x, y, 350, 22, FONT_LABEL, TEXT);
+
+        JTextField field = new JTextField();
+        field.setFont(FONT_BODY);
+        field.setBounds(x, y + 25, 350, 38);
+        parent.add(field);
+        return field;
+    }
+
+    private static JButton createButton(
+            String text, Color foreground, Color background
+    ) {
+        JButton button = new JButton(text);
+        button.setFont(FONT_LABEL);
+        button.setForeground(foreground);
+        button.setBackground(background);
+        button.setBorderPainted(false);
+        button.setFocusPainted(false);
+        button.setCursor(Cursor.getPredefinedCursor(Cursor.HAND_CURSOR));
+
+        Color hover = background.darker();
+
+        button.addMouseListener(new MouseAdapter() {
+            @Override
+            public void mouseEntered(MouseEvent e) {
+                button.setBackground(hover);
+            }
+
+            @Override
+            public void mouseExited(MouseEvent e) {
+                button.setBackground(background);
+            }
+        });
+
+        return button;
+    }
+}

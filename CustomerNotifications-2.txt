@@ -1,0 +1,188 @@
+package laundryshop_bookingsystem;
+
+import javax.swing.*;
+import java.awt.event.WindowAdapter;
+import java.awt.event.WindowEvent;
+import java.sql.Connection;
+import java.sql.PreparedStatement;
+import java.sql.ResultSet;
+import java.sql.SQLException;
+import java.sql.Statement;
+import java.util.ArrayList;
+import java.util.List;
+
+/**
+ * Simple notifications for customers.
+ *
+ * <p>Admin/Staff call {@link #add} (for example when a booking is marked
+ * Done). Every customer window calls {@link #watch}, which checks the
+ * {@code tbl_notifications} table every few seconds and shows any unread
+ * message in a dialog, then marks it as read so it appears only once.</p>
+ *
+ * <p>The table is created automatically if it does not exist yet.</p>
+ */
+public final class CustomerNotifications {
+
+    private static final int CHECK_INTERVAL_MS = 10_000;
+    private static final int FIRST_CHECK_DELAY_MS = 1_500;
+
+    private static final String CREATE_TABLE_SQL =
+            "CREATE TABLE IF NOT EXISTS tbl_notifications ("
+            + "notification_id INT AUTO_INCREMENT PRIMARY KEY, "
+            + "username VARCHAR(150) NOT NULL, "
+            + "booking_id INT NULL, "
+            + "message VARCHAR(255) NOT NULL, "
+            + "is_read TINYINT(1) NOT NULL DEFAULT 0, "
+            + "created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP)";
+
+    private static final String INSERT_SQL =
+            "INSERT INTO tbl_notifications (username, booking_id, message) "
+            + "VALUES (?, ?, ?)";
+
+    private static final String UNREAD_SQL =
+            "SELECT notification_id, message FROM tbl_notifications "
+            + "WHERE username = ? AND is_read = 0 "
+            + "ORDER BY notification_id";
+
+    private static final String MARK_READ_SQL =
+            "UPDATE tbl_notifications SET is_read = 1 "
+            + "WHERE notification_id = ?";
+
+    private CustomerNotifications() {
+    }
+
+    // =====================================================
+    // SENDING (Admin / Staff)
+    // =====================================================
+
+    /** Creates the notifications table if it is missing. */
+    public static void ensureTable(Connection con) throws SQLException {
+        try (Statement st = con.createStatement()) {
+            st.execute(CREATE_TABLE_SQL);
+        }
+    }
+
+    /**
+     * Saves a notification for a customer.
+     *
+     * @param username  the customer, exactly as stored in
+     *                  {@code tbl_bookings.username}
+     * @param bookingId the related booking
+     * @param message   text shown to the customer
+     */
+    public static void add(
+            Connection con,
+            String username,
+            int bookingId,
+            String message
+    ) throws SQLException {
+
+        ensureTable(con);
+
+        try (PreparedStatement pst = con.prepareStatement(INSERT_SQL)) {
+            pst.setString(1, username);
+            pst.setInt(2, bookingId);
+            pst.setString(3, message);
+            pst.executeUpdate();
+        }
+    }
+
+    // =====================================================
+    // RECEIVING (Customer windows)
+    // =====================================================
+
+    /**
+     * Starts checking for new notifications while {@code frame} is open.
+     * Safe to call from every customer page: the check stops by itself
+     * when the window is closed.
+     */
+    public static void watch(JFrame frame, String userName) {
+
+        if (userName == null || userName.isEmpty()) {
+            return;
+        }
+
+        final boolean[] busy = {false};
+
+        Timer timer = new Timer(CHECK_INTERVAL_MS, null);
+        timer.setInitialDelay(FIRST_CHECK_DELAY_MS);
+
+        timer.addActionListener(e -> {
+
+            if (!frame.isDisplayable()) {
+                timer.stop();
+                return;
+            }
+
+            if (!frame.isShowing() || busy[0]) {
+                return;
+            }
+
+            busy[0] = true;
+
+            try {
+                List<String> messages = takeUnread(userName);
+
+                if (!messages.isEmpty()) {
+                    JOptionPane.showMessageDialog(
+                            frame,
+                            String.join("\n\n", messages),
+                            "Laundry Update",
+                            JOptionPane.INFORMATION_MESSAGE
+                    );
+                }
+            } finally {
+                busy[0] = false;
+            }
+        });
+
+        frame.addWindowListener(new WindowAdapter() {
+            @Override
+            public void windowClosed(WindowEvent e) {
+                timer.stop();
+            }
+        });
+
+        timer.start();
+    }
+
+    /** Reads this customer's unread messages and marks them as read. */
+    private static List<String> takeUnread(String userName) {
+
+        List<String> messages = new ArrayList<>();
+
+        try (Connection con = DBConnection.connect()) {
+
+            if (con == null) {
+                return messages;
+            }
+
+            ensureTable(con);
+
+            List<Integer> ids = new ArrayList<>();
+
+            try (PreparedStatement pst = con.prepareStatement(UNREAD_SQL)) {
+                pst.setString(1, userName);
+
+                try (ResultSet rs = pst.executeQuery()) {
+                    while (rs.next()) {
+                        ids.add(rs.getInt("notification_id"));
+                        messages.add(rs.getString("message"));
+                    }
+                }
+            }
+
+            try (PreparedStatement pst = con.prepareStatement(MARK_READ_SQL)) {
+                for (int id : ids) {
+                    pst.setInt(1, id);
+                    pst.executeUpdate();
+                }
+            }
+
+        } catch (SQLException ignored) {
+            // A failed check is simply retried on the next tick.
+        }
+
+        return messages;
+    }
+}

@@ -1,0 +1,886 @@
+package laundryshop_bookingsystem;
+
+import javax.swing.*;
+import java.awt.*;
+import java.awt.event.MouseAdapter;
+import java.awt.event.MouseEvent;
+import java.sql.Connection;
+import java.sql.PreparedStatement;
+import java.sql.ResultSet;
+import java.sql.SQLException;
+import java.sql.Time;
+import java.sql.Timestamp;
+import java.time.LocalDate;
+import java.time.format.DateTimeFormatter;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Locale;
+
+/**
+ * Customer profile page.
+ *
+ * <p>Left side: profile card (initials avatar, name, username, email,
+ * member-since date, account type) and a booking summary. Right side: the
+ * customer's two latest bookings and a shortcut to create a new one.</p>
+ *
+ * <p>Details come from the {@code users} table (what the customer
+ * registered with) and the {@code tbl_bookings} table.</p>
+ */
+public class ProfilePage extends JFrame {
+
+    // =====================================================
+    // SQL
+    // =====================================================
+
+    /** SELECT * so the page still works if created_at does not exist. */
+    private static final String USER_SQL =
+            "SELECT * FROM users WHERE full_name = ? LIMIT 1";
+
+    private static final String STATS_SQL =
+            "SELECT COUNT(*) AS total, "
+            + "COALESCE(SUM(booking_status = 'Pending'), 0) AS pending, "
+            + "COALESCE(SUM(CASE WHEN payment_status = 'Paid' "
+            + "THEN amount ELSE 0 END), 0) AS paid "
+            + "FROM tbl_bookings WHERE username = ?";
+
+    private static final String RECENT_SQL =
+            "SELECT service, booking_date, booking_time, "
+            + "booking_status, payment_status, amount "
+            + "FROM tbl_bookings WHERE username = ? "
+            + "ORDER BY booking_id DESC LIMIT 2";
+
+    // =====================================================
+    // FORMATS
+    // =====================================================
+
+    private static final DateTimeFormatter MEMBER_FORMAT =
+            DateTimeFormatter.ofPattern("MMM yyyy", Locale.ENGLISH);
+
+    private static final DateTimeFormatter DATE_FORMAT =
+            DateTimeFormatter.ofPattern("MMM d, yyyy", Locale.ENGLISH);
+
+    private static final DateTimeFormatter TIME_FORMAT =
+            DateTimeFormatter.ofPattern("h:mm a", Locale.ENGLISH);
+
+    // =====================================================
+    // THEME
+    // =====================================================
+
+    private static final Color PURPLE = new Color(105, 55, 145);
+    private static final Color PURPLE_HOVER = new Color(125, 75, 165);
+    private static final Color LIGHT_PURPLE = new Color(220, 205, 235);
+    private static final Color VERY_LIGHT_PURPLE = new Color(245, 239, 248);
+    private static final Color BG = new Color(248, 245, 250);
+    private static final Color TEXT = new Color(55, 45, 65);
+    private static final Color GRAY = new Color(110, 105, 115);
+    private static final Color BORDER = new Color(225, 220, 230);
+    private static final Color GREEN = new Color(40, 140, 80);
+    private static final Color RED = new Color(190, 65, 65);
+    private static final Color AMBER = new Color(200, 120, 30);
+    private static final Color TEAL = new Color(90, 200, 190);
+    private static final Color DARK = new Color(45, 35, 55);
+
+    // =====================================================
+    // STATE
+    // =====================================================
+
+    private final String userName;
+
+    // =====================================================
+    // CONSTRUCTION
+    // =====================================================
+
+    /**
+     * Opens the profile page.
+     *
+     * @param userName the customer's full name, as passed by the login
+     */
+    public ProfilePage(String userName) {
+
+        this.userName = userName;
+
+        setTitle("Lavandera - My Profile");
+        setSize(1200, 750);
+        setDefaultCloseOperation(JFrame.EXIT_ON_CLOSE);
+        setLocationRelativeTo(null);
+        setResizable(true);
+
+        createPage(loadProfileData());
+
+        ResponsiveUI.enable(this, 1200, 750);
+    }
+
+    // =====================================================
+    // DATA
+    // =====================================================
+
+    private static class BookingInfo {
+
+        final String service;
+        final String schedule;
+        final String status;
+        final String payment;
+        final double amount;
+
+        BookingInfo(String service, String schedule, String status,
+                    String payment, double amount) {
+            this.service = service;
+            this.schedule = schedule;
+            this.status = status;
+            this.payment = payment;
+            this.amount = amount;
+        }
+    }
+
+    private static class ProfileData {
+
+        final String fullName;
+        String username = "-";
+        String email = "-";
+        String role = "Customer";
+        String memberSince = "Not available";
+        int totalBookings;
+        int pendingBookings;
+        double totalPaid;
+        final List<BookingInfo> recent = new ArrayList<>();
+
+        ProfileData(String fullName) {
+            this.fullName = fullName;
+        }
+    }
+
+    private ProfileData loadProfileData() {
+
+        ProfileData data = new ProfileData(userName);
+
+        try (Connection conn = requireConnection()) {
+
+            try (PreparedStatement pst = conn.prepareStatement(USER_SQL)) {
+                pst.setString(1, userName);
+
+                try (ResultSet rs = pst.executeQuery()) {
+                    if (rs.next()) {
+                        data.username = rs.getString("username");
+                        data.email = rs.getString("email");
+
+                        String role = rs.getString("role");
+                        if (role != null && !role.trim().isEmpty()) {
+                            data.role = role;
+                        }
+
+                        data.memberSince = readMemberSince(rs);
+                    }
+                }
+            }
+
+            try (PreparedStatement pst = conn.prepareStatement(STATS_SQL)) {
+                pst.setString(1, userName);
+
+                try (ResultSet rs = pst.executeQuery()) {
+                    if (rs.next()) {
+                        data.totalBookings = rs.getInt("total");
+                        data.pendingBookings = rs.getInt("pending");
+                        data.totalPaid = rs.getDouble("paid");
+                    }
+                }
+            }
+
+            try (PreparedStatement pst = conn.prepareStatement(RECENT_SQL)) {
+                pst.setString(1, userName);
+
+                try (ResultSet rs = pst.executeQuery()) {
+                    while (rs.next()) {
+                        data.recent.add(readBooking(rs));
+                    }
+                }
+            }
+
+        } catch (SQLException e) {
+            JOptionPane.showMessageDialog(
+                    this,
+                    "Could not load your profile details:\n" + e.getMessage(),
+                    "Database Error",
+                    JOptionPane.ERROR_MESSAGE
+            );
+        }
+
+        return data;
+    }
+
+    /** Returns e.g. "Nov 2024", or a fallback if there is no created_at. */
+    private static String readMemberSince(ResultSet rs) {
+
+        try {
+            Timestamp created = rs.getTimestamp("created_at");
+
+            if (created != null) {
+                return created.toLocalDateTime().format(MEMBER_FORMAT);
+            }
+
+        } catch (SQLException e) {
+            // The users table has no created_at column: keep the fallback
+        }
+
+        return "Not available";
+    }
+
+    private static BookingInfo readBooking(ResultSet rs) throws SQLException {
+
+        String date = "";
+        java.sql.Date sqlDate = rs.getDate("booking_date");
+
+        if (sqlDate != null) {
+            LocalDate localDate = sqlDate.toLocalDate();
+            date = localDate.format(DATE_FORMAT);
+        }
+
+        String schedule = date;
+        Time sqlTime = rs.getTime("booking_time");
+
+        if (sqlTime != null) {
+            schedule = date + "  •  " + sqlTime.toLocalTime().format(TIME_FORMAT);
+        }
+
+        return new BookingInfo(
+                rs.getString("service"),
+                schedule,
+                rs.getString("booking_status"),
+                rs.getString("payment_status"),
+                rs.getDouble("amount")
+        );
+    }
+
+    private static Connection requireConnection() throws SQLException {
+
+        Connection conn = DBConnection.connect();
+
+        if (conn == null) {
+            throw new SQLException(
+                    "Cannot connect to the database. "
+                    + "Make sure MySQL is running in XAMPP."
+            );
+        }
+
+        return conn;
+    }
+
+    // =====================================================
+    // PAGE
+    // =====================================================
+
+    private void createPage(ProfileData data) {
+
+        JPanel page = new JPanel(null);
+        page.setBackground(BG);
+        setContentPane(page);
+
+        buildTopBar(page, data);
+        buildProfileCard(page, data);
+        buildSummaryCard(page, data);
+        buildBookingsSection(page, data);
+    }
+
+    // ---------- top bar ----------
+
+    private void buildTopBar(JPanel page, ProfileData data) {
+
+        JPanel bar = new JPanel(null);
+        bar.setBackground(Color.WHITE);
+        bar.setBounds(0, 0, 1200, 80);
+        page.add(bar);
+
+        JPanel line = new JPanel();
+        line.setBackground(BORDER);
+        line.setBounds(0, 79, 1200, 1);
+        bar.add(line);
+
+        JLabel brand = new JLabel(
+                "<html><span style='color:#4B196E'>Lavandera</span>"
+                + "<span style='color:#5AC8BE'>.</span></html>"
+        );
+        brand.setFont(new Font("Georgia", Font.BOLD, 28));
+        brand.setBounds(50, 20, 220, 40);
+        bar.add(brand);
+
+        addNavButton(bar, "Home", 290, 100, false,
+                () -> open(new HomePagee(userName)));
+        addNavButton(bar, "Book Laundry", 400, 140, false,
+                () -> open(new BookingPage(userName)));
+        addNavButton(bar, "My Bookings", 550, 130, false,
+                () -> open(new MyBookingsPage(userName)));
+        addNavButton(bar, "My Profile", 690, 120, true, null);
+
+        AvatarPanel smallAvatar = new AvatarPanel(initialsOf(data.fullName), 15);
+        smallAvatar.setBounds(1100, 18, 44, 44);
+        bar.add(smallAvatar);
+    }
+
+    private void addNavButton(
+            JPanel bar, String text, int x, int width,
+            boolean active, Runnable action
+    ) {
+        JButton button = new JButton(text);
+        button.setFont(new Font("Arial", active ? Font.BOLD : Font.PLAIN, 14));
+        button.setForeground(active ? PURPLE : TEXT);
+        button.setContentAreaFilled(false);
+        button.setBorderPainted(false);
+        button.setFocusPainted(false);
+        button.setCursor(new Cursor(Cursor.HAND_CURSOR));
+        button.setBounds(x, 22, width, 36);
+        bar.add(button);
+
+        if (active) {
+            JPanel underline = new JPanel();
+            underline.setBackground(PURPLE);
+            underline.setBounds(x + 10, 74, width - 20, 3);
+            bar.add(underline);
+            return;
+        }
+
+        button.addActionListener(e -> action.run());
+
+        button.addMouseListener(new MouseAdapter() {
+            @Override
+            public void mouseEntered(MouseEvent e) {
+                button.setForeground(PURPLE);
+            }
+
+            @Override
+            public void mouseExited(MouseEvent e) {
+                button.setForeground(TEXT);
+            }
+        });
+    }
+
+    private void open(JFrame next) {
+        next.setVisible(true);
+        dispose();
+    }
+
+    // ---------- profile card (left, top) ----------
+
+    private void buildProfileCard(JPanel page, ProfileData data) {
+
+        JPanel card = createCard(50, 110, 340, 430);
+        page.add(card);
+
+        PillPanel active = new PillPanel(
+                "• Active", Color.WHITE, GREEN, GREEN
+        );
+        active.setBounds(235, 20, 85, 26);
+        card.add(active);
+
+        AvatarPanel avatar = new AvatarPanel(initialsOf(data.fullName), 46);
+        avatar.setBounds(105, 30, 130, 130);
+        card.add(avatar);
+
+        // Name with the role badge next to it
+        Font nameFont = new Font("Arial", Font.BOLD, 20);
+        Font pillFont = new Font("Arial", Font.BOLD, 10);
+
+        String roleText = data.role.toUpperCase();
+        int nameWidth = card.getFontMetrics(nameFont).stringWidth(data.fullName);
+        int pillWidth = card.getFontMetrics(pillFont).stringWidth(roleText) + 22;
+        int gap = 8;
+
+        // Long names are shortened so the badge always fits
+        int maxName = 300 - pillWidth - gap;
+        if (nameWidth > maxName) {
+            nameWidth = maxName;
+        }
+
+        int startX = (340 - (nameWidth + gap + pillWidth)) / 2;
+
+        JLabel name = new JLabel(data.fullName);
+        name.setFont(nameFont);
+        name.setForeground(TEXT);
+        name.setToolTipText(data.fullName);
+        name.setBounds(startX, 172, nameWidth, 30);
+        card.add(name);
+
+        PillPanel rolePill = new PillPanel(roleText, PURPLE, PURPLE, Color.WHITE);
+        rolePill.setPillFont(pillFont);
+        rolePill.setBounds(startX + nameWidth + gap, 177, pillWidth, 22);
+        card.add(rolePill);
+
+        JLabel username = new JLabel(
+                "@" + data.username, SwingConstants.CENTER
+        );
+        username.setFont(new Font("Arial", Font.PLAIN, 14));
+        username.setForeground(GRAY);
+        username.setBounds(20, 205, 300, 24);
+        card.add(username);
+
+        JButton bookButton = createOutlineButton("Book Laundry");
+        bookButton.setBounds(25, 245, 290, 42);
+        bookButton.addActionListener(e -> open(new BookingPage(userName)));
+        card.add(bookButton);
+
+        addDivider(card, 25, 305, 290);
+
+        addInfoRow(card, 320, "Email", data.email);
+        addInfoRow(card, 352, "Member since", data.memberSince);
+        addInfoRow(card, 384, "Account type", data.role);
+    }
+
+    private void addInfoRow(JPanel card, int y, String label, String value) {
+
+        JLabel left = new JLabel(label);
+        left.setFont(new Font("Arial", Font.PLAIN, 13));
+        left.setForeground(GRAY);
+        left.setBounds(25, y, 110, 24);
+        card.add(left);
+
+        JLabel right = new JLabel(value, SwingConstants.RIGHT);
+        right.setFont(new Font("Arial", Font.BOLD, 13));
+        right.setForeground(TEXT);
+        right.setToolTipText(value);
+        right.setBounds(135, y, 180, 24);
+        card.add(right);
+    }
+
+    // ---------- summary card (left, bottom) ----------
+
+    private void buildSummaryCard(JPanel page, ProfileData data) {
+
+        JPanel card = createCard(50, 555, 340, 150);
+        page.add(card);
+
+        JLabel title = new JLabel("Booking summary");
+        title.setFont(new Font("Arial", Font.BOLD, 16));
+        title.setForeground(TEXT);
+        title.setBounds(25, 14, 290, 26);
+        card.add(title);
+
+        JLabel counts = new JLabel(
+                data.totalBookings + " total   •   "
+                + data.pendingBookings + " pending"
+        );
+        counts.setFont(new Font("Arial", Font.PLAIN, 13));
+        counts.setForeground(GRAY);
+        counts.setBounds(25, 44, 290, 22);
+        card.add(counts);
+
+        JLabel paid = new JLabel("Paid so far: " + peso(data.totalPaid));
+        paid.setFont(new Font("Arial", Font.PLAIN, 13));
+        paid.setForeground(GRAY);
+        paid.setBounds(25, 68, 290, 22);
+        card.add(paid);
+
+        JButton viewAll = createPurpleButton("View all bookings");
+        viewAll.setBounds(25, 98, 290, 38);
+        viewAll.addActionListener(e -> open(new MyBookingsPage(userName)));
+        card.add(viewAll);
+    }
+
+    // ---------- bookings (right) ----------
+
+    private void buildBookingsSection(JPanel page, ProfileData data) {
+
+        // Header with underlined tab, like the reference
+        JPanel header = createCard(430, 110, 720, 66);
+        page.add(header);
+
+        String headerText = "MY RECENT BOOKINGS";
+        Font headerFont = new Font("Arial", Font.BOLD, 14);
+
+        JLabel headerLabel = new JLabel(headerText);
+        headerLabel.setFont(headerFont);
+        headerLabel.setForeground(TEXT);
+        headerLabel.setBounds(30, 20, 400, 24);
+        header.add(headerLabel);
+
+        JPanel underline = new JPanel();
+        underline.setBackground(PURPLE);
+        underline.setBounds(
+                30, 58, header.getFontMetrics(headerFont).stringWidth(headerText), 3
+        );
+        header.add(underline);
+
+        // Booking cards, then the "create" card
+        int x = 430;
+        final int y = 205;
+        final int step = 248;   // card width 224 + gap 24
+
+        for (BookingInfo booking : data.recent) {
+            page.add(createBookingCard(x, y, booking));
+            x += step;
+        }
+
+        page.add(createNewBookingCard(x, y));
+
+        if (data.recent.isEmpty()) {
+            JLabel empty = new JLabel(
+                    "You have no bookings yet. Create your first one!"
+            );
+            empty.setFont(new Font("Arial", Font.PLAIN, 13));
+            empty.setForeground(GRAY);
+            empty.setBounds(430, 555, 600, 24);
+            page.add(empty);
+        }
+    }
+
+    private JPanel createBookingCard(int x, int y, BookingInfo b) {
+
+        JPanel card = createCard(x, y, 224, 340);
+        card.setCursor(new Cursor(Cursor.HAND_CURSOR));
+
+        // Colored top area with the service name
+        JPanel top = new JPanel(null);
+        top.setBackground(LIGHT_PURPLE);
+        top.setBounds(0, 0, 224, 120);
+        card.add(top);
+
+        JLabel service = new JLabel(
+                "<html><div style='text-align:center'>"
+                + escape(b.service) + "</div></html>",
+                SwingConstants.CENTER
+        );
+        service.setFont(new Font("Georgia", Font.BOLD, 18));
+        service.setForeground(PURPLE);
+        service.setBounds(12, 10, 200, 100);
+        top.add(service);
+
+        JLabel schedule = new JLabel(
+                "<html>" + escape(b.schedule) + "</html>"
+        );
+        schedule.setFont(new Font("Arial", Font.PLAIN, 12));
+        schedule.setForeground(GRAY);
+        schedule.setBounds(16, 134, 196, 38);
+        card.add(schedule);
+
+        JLabel status = new JLabel("Booking: " + b.status);
+        status.setFont(new Font("Arial", Font.BOLD, 13));
+        status.setForeground(statusColor(b.status));
+        status.setBounds(16, 180, 196, 22);
+        card.add(status);
+
+        JLabel payment = new JLabel("Payment: " + b.payment);
+        payment.setFont(new Font("Arial", Font.BOLD, 13));
+        payment.setForeground(
+                "Paid".equalsIgnoreCase(b.payment) ? GREEN : RED
+        );
+        payment.setBounds(16, 206, 196, 22);
+        card.add(payment);
+
+        addDivider(card, 16, 285, 192);
+
+        JLabel totalLabel = new JLabel("TOTAL");
+        totalLabel.setFont(new Font("Arial", Font.PLAIN, 11));
+        totalLabel.setForeground(GRAY);
+        totalLabel.setBounds(16, 300, 70, 24);
+        card.add(totalLabel);
+
+        JLabel amount = new JLabel(peso(b.amount), SwingConstants.RIGHT);
+        amount.setFont(new Font("Arial", Font.BOLD, 20));
+        amount.setForeground(TEXT);
+        amount.setBounds(88, 296, 120, 30);
+        card.add(amount);
+
+        // The whole card opens My Bookings
+        MouseAdapter openAction = new MouseAdapter() {
+            @Override
+            public void mouseClicked(MouseEvent e) {
+                open(new MyBookingsPage(userName));
+            }
+        };
+
+        card.addMouseListener(openAction);
+        top.addMouseListener(openAction);
+        service.addMouseListener(openAction);
+
+        return card;
+    }
+
+    private JPanel createNewBookingCard(int x, int y) {
+
+        JPanel card = createCard(x, y, 224, 340);
+        card.setCursor(new Cursor(Cursor.HAND_CURSOR));
+
+        PlusPanel plus = new PlusPanel();
+        plus.setBounds(70, 105, 84, 84);
+        card.add(plus);
+
+        JLabel label = new JLabel("Create a new booking", SwingConstants.CENTER);
+        label.setFont(new Font("Arial", Font.BOLD, 14));
+        label.setForeground(TEXT);
+        label.setBounds(10, 205, 204, 24);
+        card.add(label);
+
+        MouseAdapter openAction = new MouseAdapter() {
+            @Override
+            public void mouseClicked(MouseEvent e) {
+                open(new BookingPage(userName));
+            }
+        };
+
+        card.addMouseListener(openAction);
+        plus.addMouseListener(openAction);
+        label.addMouseListener(openAction);
+
+        return card;
+    }
+
+    // =====================================================
+    // SMALL HELPERS
+    // =====================================================
+
+    private static String initialsOf(String fullName) {
+
+        String[] parts = fullName.trim().split("\\s+");
+
+        if (parts.length == 0 || parts[0].isEmpty()) {
+            return "?";
+        }
+
+        String initials = parts[0].substring(0, 1);
+
+        if (parts.length > 1) {
+            initials += parts[parts.length - 1].substring(0, 1);
+        }
+
+        return initials.toUpperCase();
+    }
+
+    private static String peso(double value) {
+        return String.format(Locale.ENGLISH, "₱%,.2f", value);
+    }
+
+    private static Color statusColor(String status) {
+
+        if ("Pending".equalsIgnoreCase(status)) {
+            return AMBER;
+        }
+
+        if ("Cancelled".equalsIgnoreCase(status)) {
+            return RED;
+        }
+
+        return GREEN;
+    }
+
+    private static String escape(String text) {
+
+        if (text == null) {
+            return "";
+        }
+
+        return text.replace("&", "&amp;")
+                .replace("<", "&lt;")
+                .replace(">", "&gt;");
+    }
+
+    private static JPanel createCard(int x, int y, int width, int height) {
+
+        JPanel card = new JPanel(null);
+        card.setBackground(Color.WHITE);
+        card.setBorder(BorderFactory.createLineBorder(BORDER));
+        card.setBounds(x, y, width, height);
+        return card;
+    }
+
+    private static void addDivider(JPanel parent, int x, int y, int width) {
+
+        JPanel line = new JPanel();
+        line.setBackground(BORDER);
+        line.setBounds(x, y, width, 1);
+        parent.add(line);
+    }
+
+    private static JButton createPurpleButton(String text) {
+
+        JButton button = new JButton(text);
+        button.setFont(new Font("Arial", Font.BOLD, 13));
+        button.setForeground(Color.WHITE);
+        button.setBackground(PURPLE);
+        button.setBorderPainted(false);
+        button.setFocusPainted(false);
+        button.setCursor(new Cursor(Cursor.HAND_CURSOR));
+
+        button.addMouseListener(new MouseAdapter() {
+            @Override
+            public void mouseEntered(MouseEvent e) {
+                button.setBackground(PURPLE_HOVER);
+            }
+
+            @Override
+            public void mouseExited(MouseEvent e) {
+                button.setBackground(PURPLE);
+            }
+        });
+
+        return button;
+    }
+
+    private static JButton createOutlineButton(String text) {
+
+        JButton button = new JButton(text);
+        button.setFont(new Font("Arial", Font.BOLD, 13));
+        button.setForeground(TEXT);
+        button.setBackground(Color.WHITE);
+        button.setBorder(BorderFactory.createLineBorder(DARK));
+        button.setFocusPainted(false);
+        button.setCursor(new Cursor(Cursor.HAND_CURSOR));
+
+        button.addMouseListener(new MouseAdapter() {
+            @Override
+            public void mouseEntered(MouseEvent e) {
+                button.setBackground(VERY_LIGHT_PURPLE);
+            }
+
+            @Override
+            public void mouseExited(MouseEvent e) {
+                button.setBackground(Color.WHITE);
+            }
+        });
+
+        return button;
+    }
+
+    // =====================================================
+    // CUSTOM PANELS
+    // =====================================================
+
+    /** Round avatar showing the customer's initials. */
+    private static class AvatarPanel extends JPanel {
+
+        private final String initials;
+        private final int fontSize;
+
+        AvatarPanel(String initials, int fontSize) {
+            this.initials = initials;
+            this.fontSize = fontSize;
+            setOpaque(false);
+        }
+
+        @Override
+        protected void paintComponent(Graphics g) {
+
+            super.paintComponent(g);
+
+            Graphics2D g2 = (Graphics2D) g.create();
+
+            g2.setRenderingHint(
+                    RenderingHints.KEY_ANTIALIASING,
+                    RenderingHints.VALUE_ANTIALIAS_ON
+            );
+
+            g2.setPaint(new GradientPaint(
+                    0, 0, new Color(150, 105, 190),
+                    getWidth(), getHeight(), PURPLE
+            ));
+            g2.fillOval(0, 0, getWidth() - 1, getHeight() - 1);
+
+            g2.setColor(Color.WHITE);
+            g2.setFont(new Font("Georgia", Font.BOLD, fontSize));
+
+            FontMetrics fm = g2.getFontMetrics();
+            int x = (getWidth() - fm.stringWidth(initials)) / 2;
+            int y = (getHeight() - fm.getHeight()) / 2 + fm.getAscent();
+            g2.drawString(initials, x, y);
+
+            g2.dispose();
+        }
+    }
+
+    /** Small rounded label: "Active" status and the role badge. */
+    private static class PillPanel extends JPanel {
+
+        private final String text;
+        private final Color fill;
+        private final Color outline;
+        private final Color textColor;
+        private Font pillFont = new Font("Arial", Font.BOLD, 11);
+
+        PillPanel(String text, Color fill, Color outline, Color textColor) {
+            this.text = text;
+            this.fill = fill;
+            this.outline = outline;
+            this.textColor = textColor;
+            setOpaque(false);
+        }
+
+        void setPillFont(Font font) {
+            this.pillFont = font;
+            repaint();
+        }
+
+        @Override
+        protected void paintComponent(Graphics g) {
+
+            super.paintComponent(g);
+
+            Graphics2D g2 = (Graphics2D) g.create();
+
+            g2.setRenderingHint(
+                    RenderingHints.KEY_ANTIALIASING,
+                    RenderingHints.VALUE_ANTIALIAS_ON
+            );
+
+            int w = getWidth() - 1;
+            int h = getHeight() - 1;
+
+            g2.setColor(fill);
+            g2.fillRoundRect(0, 0, w, h, h, h);
+            g2.setColor(outline);
+            g2.drawRoundRect(0, 0, w, h, h, h);
+
+            g2.setColor(textColor);
+            g2.setFont(pillFont);
+
+            FontMetrics fm = g2.getFontMetrics();
+            int x = (getWidth() - fm.stringWidth(text)) / 2;
+            int y = (getHeight() - fm.getHeight()) / 2 + fm.getAscent();
+            g2.drawString(text, x, y);
+
+            g2.dispose();
+        }
+    }
+
+    /** Dark circle with a white plus, for the "create" card. */
+    private static class PlusPanel extends JPanel {
+
+        PlusPanel() {
+            setOpaque(false);
+        }
+
+        @Override
+        protected void paintComponent(Graphics g) {
+
+            super.paintComponent(g);
+
+            Graphics2D g2 = (Graphics2D) g.create();
+
+            g2.setRenderingHint(
+                    RenderingHints.KEY_ANTIALIASING,
+                    RenderingHints.VALUE_ANTIALIAS_ON
+            );
+
+            g2.setColor(DARK);
+            g2.fillOval(0, 0, getWidth() - 1, getHeight() - 1);
+
+            g2.setColor(Color.WHITE);
+            g2.setStroke(new BasicStroke(4f));
+
+            int cx = getWidth() / 2;
+            int cy = getHeight() / 2;
+            int arm = getWidth() / 5;
+
+            g2.drawLine(cx - arm, cy, cx + arm, cy);
+            g2.drawLine(cx, cy - arm, cx, cy + arm);
+
+            g2.dispose();
+        }
+    }
+
+    // =====================================================
+    // MAIN (for testing this page on its own)
+    // =====================================================
+
+    public static void main(String[] args) {
+
+        SwingUtilities.invokeLater(() ->
+                new ProfilePage("calimpongbrent").setVisible(true)
+        );
+    }
+}
